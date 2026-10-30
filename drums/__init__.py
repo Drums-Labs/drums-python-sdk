@@ -53,7 +53,8 @@ def connect(url: str | None = None, token: str | None = None, *, timeout: float 
 
 class Client:
     def __init__(self, url: str = DEFAULT_URL, token: str | None = None, timeout: float = 900.0, retry_s: float = 60.0):
-        self.url, self.token, self.timeout, self.retry_s = url.rstrip("/"), token, timeout, retry_s
+        self.url, self.timeout, self.retry_s = url.rstrip("/"), timeout, retry_s
+        self.token = token if token is not None else os.environ.get("DRUMS_TOKEN")
 
     # transport --------------------------------------------------------------------------------------------------------
     def call(self, method: str, path: str, body=None, raw: bool = False, timeout: float | None = None):
