@@ -7,8 +7,8 @@
   C. a restore that crashes (every process of the slot's cgroups killed while CRIU restores): the reset surfaces as
      RestoreFailed or GateFailed with the record; the env is down or quarantined, never ready; release+reset or a new env
      from the same image is valid; the failure is in the metrics by cause.
-  D. template server SIGKILLed: the next reset restarts it (drumsd's safe retry), the episode is valid, the retry is
-     counted in retries_by_cause.
+  D. template server SIGKILLed: the next reset finds it gone, starts a new one before restoring (or retries if it died
+     mid-request), and the episode is valid.
 
     sudo python3 recovery_host.py OUT.json
 """
@@ -88,8 +88,21 @@ def main(out):
             err["e"] = x
     th = threading.Thread(target=do_reset)
     th.start()
-    time.sleep(0.45)                                # mid-restore (resets take ~1.5-2 s)
+    # kill as soon as the journal shows the reset in progress (a reset takes well under a second on this host)
+    rec = f"/var/lib/drums/journal/slots/{e1.id}.json"
+    t0 = time.monotonic()
+    seen = None
+    while time.monotonic() - t0 < 10:
+        try:
+            st = json.load(open(rec)).get("state")
+        except (OSError, ValueError):
+            st = None
+        if st == "resetting":
+            seen = round(time.monotonic() - t0, 3)
+            break
+        time.sleep(0.002)
     os.kill(old, signal.SIGKILL)
+    R["B_killed_after_s"] = seen
     th.join()
     wait_new_pid(old)
     check("B_post_surfaces_unavailable", isinstance(err.get("e"), drums.DaemonUnavailable), error=repr(err.get("e"))[:300])
