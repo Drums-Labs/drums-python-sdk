@@ -47,10 +47,23 @@ class Fake(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _gone(self):
+        """/v1/slots/gone/...: drumsd >= 0.4.2's 410; /v1/slots/old/...: the 409 of older ones."""
+        if self.path.startswith("/v1/slots/gone"):
+            self._send(410, {"error": "env gone is destroyed (lease: idle 1800 s): step is not possible; create a new env",
+                             "code": "env_gone", "env": "gone", "closed_reason": "lease: idle 1800 s"})
+            return True
+        if self.path.startswith("/v1/slots/old"):
+            self._send(409, {"error": "slot is destroyed: step is not allowed (allowed from: ready)"})
+            return True
+        return False
+
     def do_POST(self):
         b = self._body()
         Fake.calls.append(("POST", self.path, b))
         if not self._authed():
+            return
+        if self._gone():
             return
         if self.path == "/v1/slots":
             ck = b["checkpoint"]
@@ -88,7 +101,7 @@ class Fake(BaseHTTPRequestHandler):
             return self._send(200, {"quiescent": True, "waited_s": 1.05, "window_s": 1.0})
         if self.path.endswith("/branch"):
             kids = [slot(103), slot(104)] if b["n"] == 2 else [slot(103), slot(105, state="down", last_error="criu restore failed")]
-            return self._send(200, {"checkpoint": {"id": "s100-c102"}, "children": kids})
+            return self._send(200, {"checkpoint": {"id": "s100-c102"}, "state": "s100-c102", "children": kids, "seconds": 2.9})
         if self.path.endswith("/verify"):
             return self._send(200, Fake.verify_reply)
         if self.path == "/v1/metrics/reset":
@@ -134,6 +147,8 @@ class Fake(BaseHTTPRequestHandler):
         Fake.calls.append(("DELETE", self.path, None))
         if not self._authed():
             return
+        if self._gone():
+            return
         if self.path.startswith("/v1/checkpoints/"):
             if self.path.endswith("busy"):
                 return self._send(409, {"error": "checkpoint busy is used by envs [\"s1\"]"})
@@ -161,7 +176,7 @@ class ClientTests(unittest.TestCase):
     def setUp(self):
         Fake.calls.clear()
         Fake.down = False
-        self.c = drums.connect(self.url, TOKEN, retry_s=1)
+        self.c = drums.connect(self.url, TOKEN, retry_s=1, close_on_exit=False)
 
     def test_wrong_token_is_an_auth_error_at_connect(self):
         with self.assertRaises(drums.AuthError):
@@ -358,6 +373,116 @@ class ClientTests(unittest.TestCase):
         e = drums.env(checkpoint="clean", url=self.url, token=TOKEN)
         self.assertEqual(e.id, "s100")
         self.assertIs(drums.Env.branch, drums.Env.fork)
+        # 0.2.4: the default is the installed image (it was "clean", which no install has: NotFound on a default install)
+        drums.env(url=self.url, token=TOKEN)
+        self.assertEqual(Fake.calls[-1][2]["checkpoint"], "osworld-ubuntu")
+
+    def test_a_destroyed_env_raises_env_gone_and_close_is_a_no_op(self):
+        for eid in ("gone", "old"):                   # 0.4.2's 410, and the 409 of older drumsd
+            e = drums.Env(self.c, {"id": eid, "state": "ready"})
+            with self.assertRaises(drums.EnvGone) as cm:
+                e.step("pyautogui.press('shift')")
+            self.assertIsInstance(cm.exception, drums.NotFound, "EnvGone is a NotFound")
+            with self.assertRaises(drums.EnvGone):
+                e.reset()
+            r = e.close()                                # no-op, no raise
+            self.assertEqual(r["state"], "destroyed")
+            self.assertEqual(e.close()["state"], "destroyed")
+        self.assertEqual(cm.exception.status, 409)
+        e = drums.Env(self.c, {"id": "gone", "state": "ready"})
+        with self.assertRaises(drums.EnvGone) as cm:
+            e.step("x")
+        self.assertEqual((cm.exception.status, cm.exception.closed_reason), (410, "lease: idle 1800 s"))
+
+    def test_fork_returns_its_saved_state_and_the_old_shape(self):
+        e = self.c.create()
+        Fake.calls.clear()
+        kids = e.fork(2)
+        self.assertIsInstance(kids, list)                # the 0.2 shape: a list of the ready children
+        self.assertIsInstance(kids, drums.ForkResult)
+        self.assertEqual([k.id for k in kids], ["s103", "s104"])
+        self.assertEqual(kids.state, "s100-c102")
+        self.assertIsInstance(kids.state, drums.State)
+        self.assertEqual(e.last_state, "s100-c102")
+        self.assertEqual(kids.seconds, 2.9)
+        self.assertEqual(Fake.calls[-1][2], {"n": 2}, "no option: the 0.2 body")
+        with self.assertWarns(DeprecationWarning):
+            self.assertEqual(e.last_fork["checkpoint"]["id"], "s100-c102")
+        e.fork(2, keep_state=False, idle_timeout=120, state_idle_timeout=0)
+        self.assertEqual(Fake.calls[-1][2], {"n": 2, "delete_state_with_children": True, "idle_timeout_s": 120, "state_idle_timeout_s": 0})
+        with self.assertRaises(drums.ForkError) as f:
+            e.fork(3)
+        self.assertEqual(f.exception.state, "s100-c102")
+        with e.fork(2) as k2:
+            pass
+        self.assertEqual([c[1] for c in Fake.calls[-2:]], ["/v1/slots/s103", "/v1/slots/s104"])
+        self.assertTrue(all(c[0] == "DELETE" for c in Fake.calls[-2:]), "the with-block closes the children")
+
+    def test_leases_are_sent_only_when_set(self):
+        Fake.calls.clear()
+        self.c.create()
+        self.assertNotIn("idle_timeout_s", Fake.calls[-1][2])
+        self.c.create(idle_timeout=60, ttl=600)
+        self.assertEqual((Fake.calls[-1][2]["idle_timeout_s"], Fake.calls[-1][2]["ttl_s"]), (60, 600))
+        e = self.c.create()
+        e.save(idle_timeout=0, ttl=3600)
+        self.assertEqual(Fake.calls[-1][2], {"idle_timeout_s": 0, "ttl_s": 3600})
+
+    def test_a_quarantined_reward_is_invalid_with_a_reason_that_agrees(self):
+        e = self.c.create()
+        # drumsd 0.4.2: the checker is skipped, the verdict and gates name the quarantine
+        Fake.verify_reply = {"slot": "s147", "episode": 1, "score": None, "valid": False, "checker_error": None, "state": "quarantined",
+                             "checker_skipped": "quarantined: client", "invalid_reasons": ["quarantined: client"],
+                             "validity": {"verdict": "invalid", "gates": ["not_quarantined"]}}
+        r = e.verify(strict=False)
+        self.assertEqual((r.valid, r.verdict, r.bad_gates, r.invalid_reasons), (False, "invalid", ["not_quarantined"], ["quarantined: client"]))
+        self.assertEqual(r.checker_skipped, "quarantined: client")
+        with self.assertRaises(drums.InvalidEpisode) as cm:
+            e.verify()
+        self.assertIn("is invalid (quarantined: client)", str(cm.exception))
+        # drumsd < 0.4.2 said verdict "valid" with valid False on a quarantined env: the SDK no longer echoes that
+        Fake.verify_reply = {"slot": "s147", "episode": 1, "score": 0.0, "valid": False, "checker_error": None, "state": "quarantined",
+                             "validity": {"verdict": "valid"}}
+        r = e.verify(strict=False)
+        self.assertEqual((r.verdict, r.invalid_reasons), ("invalid", ["env is quarantined"]))
+        with self.assertRaises(drums.InvalidEpisode) as cm:
+            e.verify()
+        self.assertNotIn("is valid", str(cm.exception))
+        self.assertIn("env is quarantined", str(cm.exception))
+
+    def test_the_client_closes_the_envs_it_created(self):
+        c = drums.connect(self.url, TOKEN, retry_s=1, close_on_exit=False)
+        a, b = c.create(), c.create()
+        self.assertEqual(c.owned_envs(), ["s100"], "the fake gives every env the id s100")
+        a.close()
+        self.assertEqual(c.owned_envs(), [])
+        b.close()
+        Fake.calls.clear()
+        with drums.connect(self.url, TOKEN, retry_s=1, close_on_exit=False) as c2:
+            c2.create()
+            c2.envs()                                   # listed envs are not the client's: never closed by it
+        self.assertEqual([x[:2] for x in Fake.calls if x[0] == "DELETE"], [("DELETE", "/v1/slots/s100")])
+        self.assertEqual(c2.owned_envs(), [])
+
+    def test_a_killed_trainer_closes_its_envs_on_sigterm_and_exit(self):
+        import subprocess
+        import textwrap
+        code = textwrap.dedent(f"""
+            import os, signal, sys, time
+            sys.path.insert(0, {os.path.join(os.path.dirname(__file__), "..")!r})
+            import drums
+            c = drums.connect({self.url!r}, {TOKEN!r}, retry_s=1)
+            c.create()
+            print("created", flush=True)
+            if sys.argv[1] == "term":
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(30)
+            """)
+        for how, rc in (("term", 128 + 15), ("exit", 0)):
+            Fake.calls.clear()
+            p = subprocess.run([sys.executable, "-c", code, how], capture_output=True, text=True, timeout=60)
+            self.assertEqual(p.returncode, rc, p.stderr)
+            self.assertIn(("DELETE", "/v1/slots/s100"), [x[:2] for x in Fake.calls], f"{how}: the env was not closed")
 
 
 if __name__ == "__main__":
