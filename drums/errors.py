@@ -22,8 +22,22 @@ class NotFound(DrumsError):
     """404: no such env, image, state or task."""
 
 
+class EnvGone(NotFound):
+    """410 `env_gone`: the env was destroyed (closed by a client, or reaped by its lease). Every operation on it
+    raises this; `env.close()` on it is a no-op. Create a new env to go on. `closed_reason` says why when it was not a
+    client's close (e.g. "lease: idle 1800 s"). A subclass of NotFound, so `except NotFound` still catches it.
+    (Against drumsd < 0.4.2, the 409 "slot is destroyed" reply is raised as this too.)"""
+
+    def __init__(self, status: int, message: str, body=None):
+        super().__init__(status, message, body)
+        b = body if isinstance(body, dict) else {}
+        self.env_id = b.get("env")
+        self.closed_reason = b.get("closed_reason")
+
+
 class Conflict(DrumsError):
-    """409: the env's state does not allow this operation (e.g. step on a quarantined env)."""
+    """409: the env's state does not allow this operation (e.g. step on a quarantined env; code `wrong_state`).
+    A destroyed env raises EnvGone instead."""
 
 
 class Overloaded(DrumsError):
@@ -113,10 +127,13 @@ class TaskSetupFailed(EnvFailed):
 
 
 class ForkError(DrumsError):
-    """Some fork children did not come up. `ok` are the ready children (usable), `failed` the EnvFailed errors."""
+    """Some fork children did not come up. `ok` are the ready children (usable), `failed` the EnvFailed errors,
+    `state` the saved state the fork made (also `checkpoint`, its 0.2 name): delete it with client.delete_state(state)
+    once its envs are closed, unless the fork had keep_state=False (then drumsd deletes it)."""
 
     def __init__(self, ok: list, failed: list, checkpoint: str | None):
         self.ok, self.failed, self.checkpoint = ok, failed, checkpoint
+        self.state = checkpoint
         super().__init__(0, f"fork: {len(ok)} children ready, {len(failed)} failed: " + "; ".join(str(e) for e in failed[:3]))
 
 
@@ -129,8 +146,9 @@ class BatchError(DrumsError):
 
 
 class InvalidEpisode(DrumsError):
-    """A reward from an episode whose gates did not all pass. `reward` holds the score, flagged `valid=False`.
-    Do not train on it. (Also raised by the legacy client when an env is not ready.)"""
+    """A reward from an episode that is not valid (a gate failed or is still pending, or the env was quarantined).
+    `reward` holds it, flagged `valid=False`, with `reward.invalid_reasons`. Do not train on it.
+    (Also raised by the legacy client when an env is not ready.)"""
 
     def __init__(self, status_or_reward=0, message: str | None = None):
         if isinstance(status_or_reward, int):
@@ -139,7 +157,8 @@ class InvalidEpisode(DrumsError):
         else:
             self.reward = status_or_reward
             r = status_or_reward
-            super().__init__(0, message or f"env {r.env_id} episode {r.episode} is {r.verdict} (failed/pending gates: {r.bad_gates}); score {r.score} is not a usable reward")
+            why = "; ".join(getattr(r, "invalid_reasons", None) or []) or f"failed/pending gates: {r.bad_gates}"
+            super().__init__(0, message or f"env {r.env_id} episode {r.episode} is invalid ({why}); score {r.score} is not a usable reward")
 
 
 class CheckerError(DrumsError):

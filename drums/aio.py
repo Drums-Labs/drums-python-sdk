@@ -16,7 +16,7 @@ import asyncio
 import concurrent.futures as cf
 import functools
 
-from . import DEFAULT_IMAGE, Client, Env, connect as _connect
+from . import DEFAULT_IMAGE, Client, Env, ForkResult, connect as _connect
 
 DEFAULT_MAX_THREADS = 1024
 
@@ -47,6 +47,19 @@ class AsyncClient:
     async def task(self, task_id):
         return await self._run(self.sync.task, task_id)
 
+    async def delete_state(self, state):
+        return await self._run(self.sync.delete_state, state)
+
+    async def close(self):
+        """Close every env this client created and has not closed (see Client.close)."""
+        return await self._run(self.sync.close)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.close()
+
 
 class AsyncEnv:
     def __init__(self, env: Env, client: AsyncClient | None = None):
@@ -72,11 +85,13 @@ class AsyncEnv:
     async def verify(self, strict: bool = True):
         return await self._run(self.sync.verify, strict)
 
-    async def fork(self, n: int, strict: bool = True, quiesce_timeout=None):
-        return [AsyncEnv(e, self._client) for e in await self._run(self.sync.fork, n, strict, quiesce_timeout)]
+    async def fork(self, n: int, strict: bool = True, quiesce_timeout=None, **kw):
+        """As Env.fork (keep_state=, idle_timeout=, ttl=, state_idle_timeout=, state_ttl=): a ForkResult of AsyncEnvs."""
+        r = await self._run(self.sync.fork, n, strict, quiesce_timeout, **kw)
+        return ForkResult([AsyncEnv(e, self._client) for e in r], r.state, r.checkpoint, r.failed, r.seconds, r._client)
 
-    async def save(self, name=None, quiesce_timeout=None):
-        return await self._run(self.sync.save, name, quiesce_timeout)
+    async def save(self, name=None, quiesce_timeout=None, **kw):
+        return await self._run(self.sync.save, name, quiesce_timeout, **kw)
 
     async def wait_quiescent(self, timeout=None, window=None):
         return await self._run(self.sync.wait_quiescent, timeout, window)

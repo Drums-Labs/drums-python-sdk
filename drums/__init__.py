@@ -1,20 +1,30 @@
 """Drums SDK: isolated desktop environments for computer-use RL (standard library only).
 
     import drums
-    client = drums.connect("http://127.0.0.1:7070", token)
-    with client.create(image="osworld-ubuntu", task="035f41ba") as env:      # OSWorld task id, path or JSON dict
-        env.step("pyautogui.click(100, 200)")                                 # pyautogui code, or an action dict
-        obs = env.observe()                                                   # PNG + metadata
-        kids = env.fork(8)                                                    # 8 independent copies of this state
-        state = env.save()                                                    # a checkpoint; client.create(from_state=state)
-        r = env.verify()                                                      # task checker -> Reward (raises if the episode is invalid)
-        print(r.score, r.valid, env.metrics()["usage"])
+    with drums.connect("http://127.0.0.1:7070", token) as client:              # closes the envs it made on exit
+        with client.create(image="osworld-ubuntu", task="035f41ba") as env:  # OSWorld task id, path or JSON dict
+            env.step("pyautogui.click(100, 200)")                             # pyautogui code, or an action dict
+            obs = env.observe()                                               # PNG + metadata
+            with env.fork(8, keep_state=False) as kids:                       # 8 independent copies of this state
+                print(kids.state)                                             # the saved state the fork made
+                r = kids[0].verify()                                          # task checker -> Reward (raises if invalid)
+            state = env.save()                                                # a saved state; client.create(from_state=state)
+            print(r.score, r.valid, env.metrics()["usage"])
+
+Names: the SDK says env, saved state, fork and save; the HTTP API and raw records say slot (`/v1/slots`,
+`"slot": "s104"`), checkpoint (`/v1/checkpoints`), branch (`/branch`) and capture (`/capture`). They are the same things.
 
 Validity: every create/reset/fork child starts an episode with a gate report (isolation, mount table, network,
-cgroup limits, state hash, processes alive after resume, ...). An episode is valid only when every gate passed.
-`verify()` always carries the verdict; by default it raises InvalidEpisode instead of returning a reward from an
-invalid episode. Retries: drumsd itself retries only failures that happened before any restored process ran; the
-SDK retries only GET requests while drumsd is unreachable. Everything else is raised with the gate report.
+cgroup limits, state hash, processes alive after resume, ...). An episode is valid only when every gate passed and
+the env was never quarantined (`Reward.valid`; the reasons are in `Reward.invalid_reasons`). `verify()` always
+carries the verdict; by default it raises InvalidEpisode instead of returning a reward from an invalid episode.
+Retries: drumsd itself retries only failures that happened before any restored process ran; the SDK retries only GET
+requests while drumsd is unreachable. Everything else is raised with the gate report.
+
+Cleanup: envs and saved states have leases on the server (default: reaped after 30 min unused; `idle_timeout=` and
+`ttl=` on create/fork/save change that, 0 = never), so a crashed trainer does not hold the host forever. The client
+also closes the envs it created when the process exits (atexit, and SIGTERM/SIGHUP when their handlers were the
+default); `connect(..., close_on_exit=False)` turns that off.
 """
 from __future__ import annotations
 
@@ -28,34 +38,131 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerError, CheckpointStale, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
-                     ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RestoreFailed, TaskSetupFailed)
+import atexit
+import signal
+import threading
+import warnings
 
-__version__ = "0.2.3"
+from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerError, CheckpointStale, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
+                     EnvGone, ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RestoreFailed, TaskSetupFailed)
+
+__version__ = "0.2.4"
 DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or "http://127.0.0.1:7070"
 DEFAULT_IMAGE = "osworld-ubuntu"
 
-__all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "env", "__version__",
-           "DrumsError", "AuthError", "BadRequest", "NotFound", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
+__all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "ForkResult", "env", "__version__",
+           "DrumsError", "AuthError", "BadRequest", "NotFound", "EnvGone", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
            "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded",
            "CheckpointStale"]
 
-_STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 422: BadRequest, 429: Overloaded, 502: GuestError, 503: DaemonUnavailable}
+_STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 410: EnvGone, 422: BadRequest, 429: Overloaded, 502: GuestError,
+           503: DaemonUnavailable}
 
 
-def connect(url: str | None = None, token: str | None = None, *, timeout: float = 900.0, retry_s: float = 60.0, check: bool = True) -> "Client":
+def connect(url: str | None = None, token: str | None = None, *, timeout: float = 900.0, retry_s: float = 60.0, check: bool = True,
+            close_on_exit: bool = True, handle_signals: bool = True) -> "Client":
     """A client for one drumsd. `url`/`token` default to $DRUMS_URL / $DRUMS_TOKEN. With check=True the token is tried
-    at once (AuthError / DaemonUnavailable here rather than on the first create)."""
-    c = Client(url or DEFAULT_URL, token if token is not None else os.environ.get("DRUMS_TOKEN"), timeout=timeout, retry_s=retry_s)
+    at once (AuthError / DaemonUnavailable here rather than on the first create).
+    close_on_exit=True: the envs this client created and did not close are closed when the process exits (atexit) or
+    when the client is used as a context manager and the block ends. handle_signals=True: SIGTERM and SIGHUP exit
+    through that cleanup too, when their handler is still the default one (never replaces a handler you installed;
+    main thread only). A `kill -9` cannot be caught: the server-side leases reap those envs."""
+    c = Client(url or DEFAULT_URL, token if token is not None else os.environ.get("DRUMS_TOKEN"), timeout=timeout, retry_s=retry_s,
+               close_on_exit=close_on_exit, handle_signals=handle_signals)
     if check:
         c.health()
     return c
 
 
+def _exit_on_signal(signum, frame):  # noqa: ARG001
+    raise SystemExit(128 + signum)
+
+
+def _install_signal_exit():
+    """SIGTERM/SIGHUP -> SystemExit, so `finally`, context managers and atexit run (only over default handlers)."""
+    if threading.current_thread() is not threading.main_thread():
+        return
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None and signal.getsignal(sig) == signal.SIG_DFL:
+            try:
+                signal.signal(sig, _exit_on_signal)
+            except (ValueError, OSError):
+                pass
+
+
 class Client:
-    def __init__(self, url: str = DEFAULT_URL, token: str | None = None, timeout: float = 900.0, retry_s: float = 60.0):
+    def __init__(self, url: str = DEFAULT_URL, token: str | None = None, timeout: float = 900.0, retry_s: float = 60.0,
+                 close_on_exit: bool = False, handle_signals: bool = False):
         self.url, self.timeout, self.retry_s = url.rstrip("/"), timeout, retry_s
         self.token = token if token is not None else os.environ.get("DRUMS_TOKEN")
+        self._owned: dict[str, None] = {}          # ids of envs this client created and has not closed (insertion order)
+        self._owned_lock = threading.Lock()
+        self.close_on_exit = close_on_exit
+        if close_on_exit:
+            atexit.register(self._close_at_exit)
+        if handle_signals:
+            _install_signal_exit()
+
+    # cleanup ----------------------------------------------------------------------------------------------------------
+    def _own(self, env_id):
+        if env_id:
+            with self._owned_lock:
+                self._owned[env_id] = None
+
+    def _disown(self, env_id):
+        with self._owned_lock:
+            self._owned.pop(env_id, None)
+
+    def owned_envs(self) -> list:
+        """Ids of the envs this client created and has not closed."""
+        with self._owned_lock:
+            return list(self._owned)
+
+    def close(self, timeout: float = 30.0) -> list:
+        """Close every env this client created and has not closed (in parallel). Envs that are already gone are
+        skipped. Returns [(env_id, error or None)]. Saved states are not deleted here (their leases, or
+        fork(keep_state=False), or client.delete_state, take care of them)."""
+        ids = self.owned_envs()
+        if not ids:
+            return []
+
+        def one(i):
+            try:
+                self.call("DELETE", f"/v1/slots/{urllib.parse.quote(i)}", timeout=timeout)
+            except (EnvGone, NotFound):
+                pass
+            except Exception as e:  # noqa: BLE001
+                return i, e
+            finally:
+                self._disown(i)
+            return i, None
+        try:
+            with cf.ThreadPoolExecutor(min(16, len(ids))) as ex:
+                return list(ex.map(one, ids))
+        except RuntimeError:          # at interpreter shutdown no new thread can start: one by one, within a budget
+            deadline = time.monotonic() + max(timeout, 1.0)
+            out = []
+            for i in self.owned_envs():
+                if time.monotonic() > deadline:
+                    out.append((i, DrumsError(0, "not closed: the close budget ran out (its lease will reap it)")))
+                    continue
+                out.append(one(i))
+            return out
+
+    def _close_at_exit(self):
+        # bounded: an unreachable drumsd must not hang the exit (the envs' leases reap whatever is left)
+        if self.close_on_exit:
+            try:
+                self.close(timeout=10.0)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     # transport --------------------------------------------------------------------------------------------------------
     def call(self, method: str, path: str, body=None, raw: bool = False, timeout: float | None = None):
@@ -88,6 +195,8 @@ class Client:
                         cls = NotQuiescent
                     if e.code == 409 and isinstance(body_j, dict) and body_j.get("code") == "checkpoint_stale":
                         cls = CheckpointStale
+                    if e.code == 409 and "slot is destroyed" in str(msg):      # drumsd < 0.4.2
+                        cls = EnvGone
                     raise cls(e.code, msg, body_j) from None
             except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
                 if time.monotonic() >= deadline:
@@ -102,7 +211,9 @@ class Client:
 
     def metrics(self) -> dict:
         """Aggregate metrics of the current window: op latency (create/reset/fork/step/verify/...), episodes by verdict,
-        failures and retries by cause, rewards, and cost (host price x wall time, per valid episode / verified reward)."""
+        failures and retries by cause, rewards, and cost (host price x wall time, per valid episode / verified reward).
+        The cost counts the whole window's wall time, idle time included: the window starts when drumsd started or at
+        the last reset_metrics(), so call reset_metrics() at the start of a run to measure that run."""
         return self.call("GET", "/v1/metrics")
 
     def reset_metrics(self) -> dict:
@@ -114,8 +225,10 @@ class Client:
         return self.call("GET", "/v1/checkpoints")
 
     def delete_state(self, state) -> dict:
-        """Delete a saved state (from save() or fork()): its template server stops and its images are freed. Refused
-        (Conflict) while an env made from it still exists. States are not deleted automatically."""
+        """Delete a saved state (from save() or fork(); API: checkpoint): its template server stops and its images are
+        freed. Refused (Conflict) while an env made from it still exists. drumsd also deletes a state by itself when
+        its lease runs out (default: 30 min with no env made from it) or, for fork(keep_state=False), when its last
+        env closes."""
         return self.call("DELETE", f"/v1/checkpoints/{urllib.parse.quote(str(state))}")
 
     def tasks(self, domain: str | None = None) -> list:
@@ -127,7 +240,8 @@ class Client:
         return self.call("GET", f"/v1/tasks/{urllib.parse.quote(task_id)}")
 
     def envs(self) -> list:
-        """The live envs (drumsd >= 0.4 lists only those; older ones list every env, so destroyed ones are dropped here)."""
+        """The live envs on the host (drumsd >= 0.4 lists only those; older ones list every env, so destroyed ones are
+        dropped here). These Env objects are not owned by this client: close_on_exit does not close them."""
         return [Env(self, r) for r in self.call("GET", "/v1/slots") if r.get("state") != "destroyed"]
 
     def env_records(self, include_destroyed: bool = False, page_size: int = 500):
@@ -158,21 +272,31 @@ class Client:
         raise BadRequest(400, f"task must be an OSWorld JSON dict, a path, or a task id; got {type(task).__name__}")
 
     # envs -------------------------------------------------------------------------------------------------------------
-    def create(self, image: str = DEFAULT_IMAGE, task=None, *, from_state=None, setup: bool | None = None) -> "Env":
+    def create(self, image: str = DEFAULT_IMAGE, task=None, *, from_state=None, setup: bool | None = None,
+               idle_timeout: float | None = None, ttl: float | None = None) -> "Env":
         """A new env from an image (or from a saved state), with an optional OSWorld task whose setup runs now and after
-        every reset. Raises RestoreFailed / GateFailed / TaskSetupFailed if it did not come up ready."""
+        every reset. Raises RestoreFailed / GateFailed / TaskSetupFailed if it did not come up ready (the env still
+        exists on the server, down or quarantined: close it, or let its lease reap it).
+        idle_timeout / ttl (seconds): the env's lease. drumsd destroys it after `idle_timeout` s with no request naming
+        it, or `ttl` s after it was created. None = the server's default (30 min idle, no TTL); 0 = no limit."""
         ck = str(from_state) if from_state is not None else image
         body = {"checkpoint": ck, "task": self._task(task)}
         if setup is not None:
             body["setup"] = setup
+        if idle_timeout is not None:
+            body["idle_timeout_s"] = idle_timeout
+        if ttl is not None:
+            body["ttl_s"] = ttl
         e = Env(self, self.call("POST", "/v1/slots", body))
+        self._own(e.record.get("id"))
         e._check_up()
         return e
 
-    def create_many(self, n: int, image: str = DEFAULT_IMAGE, task=None, *, from_state=None, workers: int = 8) -> list:
+    def create_many(self, n: int, image: str = DEFAULT_IMAGE, task=None, *, from_state=None, workers: int = 8,
+                    idle_timeout: float | None = None, ttl: float | None = None) -> list:
         """n envs created concurrently. All ready -> the list; otherwise BatchError(ok=[ready envs], failed=[(i, error)])."""
         t = self._task(task)
-        res = self.map(lambda i: self.create(image, t, from_state=from_state), range(n), workers=workers)
+        res = self.map(lambda i: self.create(image, t, from_state=from_state, idle_timeout=idle_timeout, ttl=ttl), range(n), workers=workers)
         ok = [r for r in res if isinstance(r, Env)]
         failed = [(i, r) for i, r in enumerate(res) if not isinstance(r, Env)]
         if failed:
@@ -206,7 +330,48 @@ def _png_size(png: bytes):
 
 
 class State(str):
-    """A saved state (checkpoint id). Pass to client.create(from_state=...)."""
+    """A saved state (API: checkpoint id). Pass to client.create(from_state=...); free it with client.delete_state()."""
+
+
+class ForkResult(list):
+    """What fork() returns: the ready children, as the plain list fork() always returned, plus the fork's saved state.
+
+    `state` is the saved state the fork made (a State). With fork(..., keep_state=False) drumsd deletes it once its
+    last env is closed; otherwise it stays until client.delete_state(state) or its lease (default 30 min with no env
+    made from it). `checkpoint` is the server's full record of it, `failed` the children that did not come up
+    (strict=False only), `seconds` the fork's time. As a context manager it closes the children at the end."""
+
+    def __init__(self, children, state=None, checkpoint=None, failed=None, seconds=None, client=None):
+        super().__init__(children)
+        self.state = State(state) if state else None
+        self.checkpoint = checkpoint or {}
+        self.failed = failed or []
+        self.seconds = seconds
+        self._client = client
+
+    def close(self) -> None:
+        """Close every child (already closed ones are skipped)."""
+        for k in self:
+            try:
+                getattr(k, "sync", k).close()      # an aio AsyncEnv is closed through its sync Env
+            except DrumsError:
+                pass
+
+    def delete_state(self) -> dict | None:
+        """Close the children, then delete the saved state now (NotFound/EnvGone-safe)."""
+        self.close()
+        if self.state and self._client is not None:
+            try:
+                return self._client.delete_state(self.state)
+            except NotFound:
+                return None
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
 
 class StepResult(dict):
@@ -249,20 +414,43 @@ class Reward:
         self.verdict = self.validity.get("verdict")
         self.bad_gates = self.validity.get("gates", [])
         self.checker_error = d.get("checker_error")
+        self.checker_skipped = d.get("checker_skipped")     # e.g. "quarantined: client": the checker did not run
         self.gates = d.get("gates")
         self.seconds = d.get("seconds")
+        # why the episode is not valid, in words (empty when valid). drumsd >= 0.4.2 sends them; for an older one
+        # they are derived, and a quarantined env's "valid" verdict (the old inconsistency) is reported as invalid.
+        self.invalid_reasons = list(d.get("invalid_reasons") or [])
+        if not self.valid and not self.invalid_reasons:
+            if d.get("state") not in (None, "ready"):
+                self.invalid_reasons.append(f"env is {d.get('state')}")
+            self.invalid_reasons += [f"gate {g} {'pending' if self.verdict == 'pending' else 'failed'}" for g in self.bad_gates]
+        if not self.valid and self.verdict == "valid":
+            self.verdict = "invalid"
 
     def __repr__(self):
         return f"<drums.Reward env={self.env_id} ep={self.episode} score={self.score} valid={self.valid}{' ERR' if self.checker_error else ''}>"
 
 
 class Env:
-    """One isolated desktop environment (a drumsd slot)."""
+    """One isolated desktop environment (API: a slot, `/v1/slots/{id}`)."""
 
     def __init__(self, client: Client, record: dict):
         self.client, self.record = client, record
         self.steps = 0
-        self.last_fork = None      # the last fork()'s server reply (checkpoint record with its quiescence record)
+        self._last_fork = None
+        self.last_state = None     # the saved state the last fork() of this env made (a State), or None
+
+    @property
+    def last_fork(self):
+        """Deprecated (0.2.4): the last fork()'s raw server reply. Use the ForkResult fork() returns (`.state`,
+        `.checkpoint`) or `env.last_state`."""
+        warnings.warn("Env.last_fork is deprecated; use the ForkResult fork() returns (.state, .checkpoint) or env.last_state",
+                      DeprecationWarning, stacklevel=2)
+        return self._last_fork
+
+    @last_fork.setter
+    def last_fork(self, v):
+        self._last_fork = v
 
     # identity ---------------------------------------------------------------------------------------------------------
     id = property(lambda self: self.record["id"])
@@ -291,13 +479,15 @@ class Env:
         """New episode from this env's checkpoint (and the task's setup, for an env created with a task)."""
         self.record = self.client.call("POST", f"/v1/slots/{self.id}/reset")
         self.steps = 0
-        self.last_fork = None      # the last fork()'s server reply (checkpoint record with its quiescence record)
+        self._last_fork = None
         self._check_up()
         return self
 
     def step(self, action, screenshot: bool = False, check: bool = True) -> StepResult:
         """pyautogui code (str) or an action dict: {"type": "pyautogui", "code"}, {"type": "execute", "command", "shell"},
-        {"type": "launch", "command", "shell"}, {"type": "sleep", "seconds"}.
+        {"type": "launch", "command", "shell"}, {"type": "sleep", "seconds"}. Screen 1920x1080, origin top left, pixels.
+        pyautogui and execute run inside the env as its desktop user `user` (not root), with OSWorld's prefix
+        (`import pyautogui, time`). See docs/actions-and-observations.md.
         check=True (default): an action that ran and exited non-zero raises ActionFailed with its exit status, output
         and error; check=False returns the result as is. A guest that does not answer or times out (120 s) raises
         GuestError either way."""
@@ -356,8 +546,9 @@ class Env:
 
     def verify(self, strict: bool = True) -> Reward:
         """Run the task's checker on the current state. The server waits for the episode's last gate first.
-        strict=True: raises InvalidEpisode (reward attached, flagged) if the episode is not valid, CheckerError if the
-        checker failed. strict=False: returns the Reward; check `.valid` before using `.score`.
+        strict=True: raises InvalidEpisode (reward attached, flagged, with `.invalid_reasons`) if the episode is not
+        valid, CheckerError if the checker failed. strict=False: returns the Reward; use `.score` only when `.valid`.
+        On a quarantined env the checker is not run: score None, valid False, reason "quarantined: <why>".
         Note: OSWorld checkers may run a postconfig (save, close a window) that changes the desktop."""
         r = Reward(self.client.call("POST", f"/v1/slots/{self.id}/verify", {}))
         if strict and r.checker_error is not None:
@@ -385,29 +576,52 @@ class Env:
         body = {k: v for k, v in (("timeout_s", timeout), ("window_s", window)) if v is not None}
         return self.client.call("POST", f"/v1/slots/{self.id}/quiescent", body)
 
-    def save(self, name: str | None = None, quiesce_timeout: float | None = None) -> State:
-        """Checkpoint the current state (this env keeps running). client.create(from_state=...) starts from it.
+    def save(self, name: str | None = None, quiesce_timeout: float | None = None, *, idle_timeout: float | None = None,
+             ttl: float | None = None) -> State:
+        """Save the current state (API: capture; this env keeps running). client.create(from_state=...) starts from it.
         Safe right after an action: drumsd waits until the tree is quiescent and checks that the dump is that tree
-        (NotQuiescent if it cannot within `quiesce_timeout`, server default 30 s; nothing is captured then)."""
+        (NotQuiescent if it cannot within `quiesce_timeout`, server default 30 s; nothing is captured then).
+        idle_timeout / ttl (seconds): the state's lease. drumsd deletes it after `idle_timeout` s with no env made from
+        it (counted from its creation or its last env's close), or `ttl` s after it was made once no env uses it.
+        None = the server's default (30 min idle, no TTL); 0 = no limit."""
         body = {"id": name} if name else {}
         if quiesce_timeout is not None:
             body["quiesce_timeout_s"] = quiesce_timeout
+        if idle_timeout is not None:
+            body["idle_timeout_s"] = idle_timeout
+        if ttl is not None:
+            body["ttl_s"] = ttl
         return State(self.client.call("POST", f"/v1/slots/{self.id}/capture", body)["id"])
 
-    def fork(self, n: int, strict: bool = True, quiesce_timeout: float | None = None) -> list:
-        """Checkpoint this state and start n independent children from it (concurrently); this env keeps running.
-        Safe right after an action (no sleep needed): the capture waits for a quiescent tree, see save().
-        strict=True: if any child failed, raises ForkError(ok=[ready children], failed=[EnvFailed...])."""
+    def fork(self, n: int, strict: bool = True, quiesce_timeout: float | None = None, *, keep_state: bool = True,
+             idle_timeout: float | None = None, ttl: float | None = None, state_idle_timeout: float | None = None,
+             state_ttl: float | None = None) -> ForkResult:
+        """Save this state and start n independent children from it, concurrently (API: branch); this env keeps
+        running. Safe right after an action (no sleep needed): the capture waits for a quiescent tree, see save().
+        Returns a ForkResult: the ready children (a list, as before) with `.state`, the saved state the fork made
+        (also `env.last_state`). keep_state=False: drumsd deletes that state as soon as its last env is closed, so a
+        loop does not leak one state (~600 MB of RAM) per fork; keep_state=True (default): it stays until
+        client.delete_state(state) or its lease. idle_timeout/ttl: the children's leases (see create);
+        state_idle_timeout/state_ttl: the state's (see save).
+        strict=True: if any child failed, raises ForkError(ok=[ready children], failed=[EnvFailed...], state)."""
         body = {"n": n}
         if quiesce_timeout is not None:
             body["quiesce_timeout_s"] = quiesce_timeout
+        if not keep_state:
+            body["delete_state_with_children"] = True
+        for k, v in (("idle_timeout_s", idle_timeout), ("ttl_s", ttl), ("state_idle_timeout_s", state_idle_timeout), ("state_ttl_s", state_ttl)):
+            if v is not None:
+                body[k] = v
         r = self.client.call("POST", f"/v1/slots/{self.id}/branch", body)
-        self.last_fork = r
+        self._last_fork = r
+        ck = r.get("checkpoint") or {}
+        self.last_state = State(ck["id"]) if ck.get("id") else None
         ok, failed = [], []
         for c in r["children"]:
             if "error" in c:
                 failed.append(DrumsError(0, c["error"]))
                 continue
+            self.client._own(c.get("id"))
             e = Env(self.client, c)
             try:
                 e._check_up()
@@ -417,8 +631,8 @@ class Env:
                 if not strict:
                     ok.append(e)
         if failed and strict:
-            raise ForkError(ok, failed, (r.get("checkpoint") or {}).get("id"))
-        return ok
+            raise ForkError(ok, failed, ck.get("id"))
+        return ForkResult(ok, ck.get("id"), ck, failed, r.get("seconds"), self.client)
 
     branch = fork      # 0.1 name
 
@@ -433,9 +647,16 @@ class Env:
         return self.record
 
     def close(self) -> dict:
+        """Destroy this env (its records are kept on the host). A no-op on an env that is already gone (closed here or
+        elsewhere, or reaped by its lease)."""
         if self.record.get("state") in ("destroyed",):
+            self.client._disown(self.id)
             return self.record
-        self.record = self.client.call("DELETE", f"/v1/slots/{self.id}")
+        try:
+            self.record = self.client.call("DELETE", f"/v1/slots/{self.id}")
+        except (EnvGone, NotFound) as e:
+            self.record = {**self.record, "state": "destroyed", "closed_reason": getattr(e, "closed_reason", None) or str(e)}
+        self.client._disown(self.id)
         return self.record
 
     def guest(self) -> "GuestClient":
@@ -482,9 +703,10 @@ class GuestClient:
 
 
 # ---- 0.1 compatibility ----------------------------------------------------------------------------------------------
-def env(task: dict | None = None, *, from_state: str | None = None, checkpoint: str = "clean", url: str = DEFAULT_URL,
+def env(task: dict | None = None, *, from_state: str | None = None, checkpoint: str = DEFAULT_IMAGE, url: str = DEFAULT_URL,
         token: str | None = None) -> Env:
-    """0.1 entry point: a new env (`from_state` wins over `checkpoint`). Prefer drums.connect(...).create(...)."""
+    """0.1 entry point: a new env (`from_state` wins over `checkpoint`, default the installed image "osworld-ubuntu";
+    before 0.2.4 the default was "clean", which no install has). Prefer drums.connect(...).create(...)."""
     c = Client(url, token if token is not None else os.environ.get("DRUMS_TOKEN"))
     rec = c.call("POST", "/v1/slots", {"checkpoint": from_state or checkpoint, "task": task})
     e = Env(c, rec)
