@@ -25,6 +25,7 @@ class Fake(BaseHTTPRequestHandler):
     gates_seq = []
     verify_reply = {}
     down = False
+    step_delay = 0.0
 
     def log_message(self, *a):
         pass
@@ -65,6 +66,7 @@ class Fake(BaseHTTPRequestHandler):
         if self.path.endswith("/reset"):
             return self._send(200, slot(100, episode=2))
         if self.path.endswith("/step"):
+            time.sleep(Fake.step_delay)
             return self._send(200, {"result": {"status": "success", "returncode": 0}, "screenshot_png_b64": __import__("base64").b64encode(PNG).decode(),
                                     "episode": 2, "validity": {"verdict": "pending"}, "seconds": 0.1})
         if self.path.endswith("/capture"):
@@ -127,6 +129,7 @@ def reward(valid=True, score=1.0, err=None):
 class ClientTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        ThreadingHTTPServer.request_queue_size = 512     # many concurrent clients in test_async_concurrency
         cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), Fake)
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
         cls.url = f"http://127.0.0.1:{cls.srv.server_address[1]}"
@@ -272,6 +275,24 @@ class ClientTests(unittest.TestCase):
             return rs
         rs = asyncio.run(main())
         self.assertEqual([r.score for r in rs], [1.0] * 4)
+
+    def test_async_concurrency_is_not_capped_by_the_default_executor(self):
+        # asyncio.to_thread runs on the loop's default executor: min(32, cpu_count + 4) threads. 128 envs stepping at
+        # once then ran in waves of <= 32, so a 128-env asyncio driver was silently a 32-env one.
+        n, delay = 128, 0.5
+
+        async def main():
+            c = await drums.aio.connect(self.url, TOKEN)
+            envs = await asyncio.gather(*[c.create() for _ in range(n)])
+            Fake.step_delay = delay
+            try:
+                t0 = time.monotonic()
+                await asyncio.gather(*[e.step("pyautogui.moveTo(1, 1)") for e in envs])
+                return time.monotonic() - t0
+            finally:
+                Fake.step_delay = 0.0
+        took = asyncio.run(main())
+        self.assertLess(took, 3 * delay, f"{n} concurrent steps of {delay} s took {took:.2f} s")
 
     def test_guest_adapter(self):
         g = self.c.create().guest()
