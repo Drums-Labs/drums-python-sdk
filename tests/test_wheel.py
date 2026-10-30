@@ -11,6 +11,7 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "install"))
+sys.dont_write_bytecode = True     # no __pycache__ in install/
 import build_wheel  # noqa: E402
 
 
