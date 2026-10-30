@@ -54,11 +54,14 @@ class AsyncEnv:
     async def verify(self, strict: bool = True):
         return await asyncio.to_thread(self.sync.verify, strict)
 
-    async def fork(self, n: int, strict: bool = True):
-        return [AsyncEnv(e) for e in await asyncio.to_thread(self.sync.fork, n, strict)]
+    async def fork(self, n: int, strict: bool = True, quiesce_timeout=None):
+        return [AsyncEnv(e) for e in await asyncio.to_thread(self.sync.fork, n, strict, quiesce_timeout)]
 
-    async def save(self, name=None):
-        return await asyncio.to_thread(self.sync.save, name)
+    async def save(self, name=None, quiesce_timeout=None):
+        return await asyncio.to_thread(self.sync.save, name, quiesce_timeout)
+
+    async def wait_quiescent(self, timeout=None, window=None):
+        return await asyncio.to_thread(self.sync.wait_quiescent, timeout, window)
 
     async def metrics(self):
         return await asyncio.to_thread(self.sync.metrics)

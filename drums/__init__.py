@@ -29,15 +29,15 @@ import urllib.parse
 import urllib.request
 
 from .errors import (AuthError, BadRequest, BatchError, CheckerError, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
-                     ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, RestoreFailed, TaskSetupFailed)
+                     ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, NotQuiescent, RestoreFailed, TaskSetupFailed)
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or "http://127.0.0.1:7070"
 DEFAULT_IMAGE = "osworld-ubuntu"
 
 __all__ = ["connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "env", "__version__",
            "DrumsError", "AuthError", "BadRequest", "NotFound", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
-           "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError"]
+           "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent"]
 
 _STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 422: BadRequest, 502: GuestError, 503: DaemonUnavailable}
 
@@ -82,7 +82,10 @@ class Client:
                 if e.code == 503 and time.monotonic() < deadline:
                     pass
                 else:
-                    raise _STATUS.get(e.code, DrumsError)(e.code, msg, body_j) from None
+                    cls = _STATUS.get(e.code, DrumsError)
+                    if e.code == 409 and isinstance(body_j, dict) and body_j.get("code") == "not_quiescent":
+                        cls = NotQuiescent
+                    raise cls(e.code, msg, body_j) from None
             except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
                 if time.monotonic() >= deadline:
                     what = "the outcome is unknown; call env.refresh()" if method != "GET" else f"retried for {self.retry_s:.0f} s"
@@ -238,6 +241,7 @@ class Env:
     def __init__(self, client: Client, record: dict):
         self.client, self.record = client, record
         self.steps = 0
+        self.last_fork = None      # the last fork()'s server reply (checkpoint record with its quiescence record)
 
     # identity ---------------------------------------------------------------------------------------------------------
     id = property(lambda self: self.record["id"])
@@ -266,6 +270,7 @@ class Env:
         """New episode from this env's checkpoint (and the task's setup, for an env created with a task)."""
         self.record = self.client.call("POST", f"/v1/slots/{self.id}/reset")
         self.steps = 0
+        self.last_fork = None      # the last fork()'s server reply (checkpoint record with its quiescence record)
         self._check_up()
         return self
 
@@ -344,14 +349,32 @@ class Env:
         return self.client.call("GET", f"/v1/slots/{self.id}/metrics")
 
     # branching --------------------------------------------------------------------------------------------------------
-    def save(self, name: str | None = None) -> State:
-        """Checkpoint the current state (this env keeps running). client.create(from_state=...) starts from it."""
-        return State(self.client.call("POST", f"/v1/slots/{self.id}/capture", {"id": name} if name else {})["id"])
+    def wait_quiescent(self, timeout: float | None = None, window: float | None = None) -> dict:
+        """Block until this env's process tree is safe to capture: no process or thread starting or exiting for
+        `window` seconds (server default 1 s), no task exiting, no unreaped zombie. fork() and save() already do this
+        themselves, so calling it is optional (useful to time it, or to wait without capturing). Returns the wait
+        record; raises NotQuiescent after `timeout` seconds (server default 30 s)."""
+        body = {k: v for k, v in (("timeout_s", timeout), ("window_s", window)) if v is not None}
+        return self.client.call("POST", f"/v1/slots/{self.id}/quiescent", body)
 
-    def fork(self, n: int, strict: bool = True) -> list:
+    def save(self, name: str | None = None, quiesce_timeout: float | None = None) -> State:
+        """Checkpoint the current state (this env keeps running). client.create(from_state=...) starts from it.
+        Safe right after an action: drumsd waits until the tree is quiescent and checks that the dump is that tree
+        (NotQuiescent if it cannot within `quiesce_timeout`, server default 30 s; nothing is captured then)."""
+        body = {"id": name} if name else {}
+        if quiesce_timeout is not None:
+            body["quiesce_timeout_s"] = quiesce_timeout
+        return State(self.client.call("POST", f"/v1/slots/{self.id}/capture", body)["id"])
+
+    def fork(self, n: int, strict: bool = True, quiesce_timeout: float | None = None) -> list:
         """Checkpoint this state and start n independent children from it (concurrently); this env keeps running.
+        Safe right after an action (no sleep needed): the capture waits for a quiescent tree, see save().
         strict=True: if any child failed, raises ForkError(ok=[ready children], failed=[EnvFailed...])."""
-        r = self.client.call("POST", f"/v1/slots/{self.id}/branch", {"n": n})
+        body = {"n": n}
+        if quiesce_timeout is not None:
+            body["quiesce_timeout_s"] = quiesce_timeout
+        r = self.client.call("POST", f"/v1/slots/{self.id}/branch", body)
+        self.last_fork = r
         ok, failed = [], []
         for c in r["children"]:
             if "error" in c:

@@ -69,6 +69,12 @@ class Fake(BaseHTTPRequestHandler):
                                     "episode": 2, "validity": {"verdict": "pending"}, "seconds": 0.1})
         if self.path.endswith("/capture"):
             return self._send(200, {"id": "s100-c101"})
+        if self.path.endswith("/quiescent") or (self.path.endswith("/branch") and b.get("quiesce_timeout_s") == 0.1):
+            if (b or {}).get("timeout_s") == 0.1 or (b or {}).get("quiesce_timeout_s") == 0.1:
+                return self._send(409, {"error": "env s100 is not quiescent, nothing was captured", "code": "not_quiescent",
+                                        "unstable": [{"kind": "thread_exited", "pid": 552, "tid": 553, "comm": "chrome"}],
+                                        "quiescence": {"attempts": [{"n": 1}]}})
+            return self._send(200, {"quiescent": True, "waited_s": 1.05, "window_s": 1.0})
         if self.path.endswith("/branch"):
             kids = [slot(103), slot(104)] if b["n"] == 2 else [slot(103), slot(105, state="down", last_error="criu restore failed")]
             return self._send(200, {"checkpoint": {"id": "s100-c102"}, "children": kids})
@@ -197,6 +203,25 @@ class ClientTests(unittest.TestCase):
         self.assertEqual([k.id for k in f.exception.ok], ["s103"])
         self.assertIsInstance(f.exception.failed[0], drums.RestoreFailed)
         self.assertEqual(len(e.fork(3, strict=False)), 2)
+
+    def test_quiescence_is_typed_and_optional(self):
+        e = self.c.create(image="img")
+        self.assertTrue(e.wait_quiescent()["quiescent"])
+        with self.assertRaises(drums.NotQuiescent) as cm:
+            e.wait_quiescent(timeout=0.1)
+        self.assertIsInstance(cm.exception, drums.Conflict, "NotQuiescent is a Conflict (old except clauses still catch it)")
+        self.assertEqual(cm.exception.unstable[0]["comm"], "chrome")
+        self.assertEqual(cm.exception.quiescence["attempts"][0]["n"], 1)
+        with self.assertRaises(drums.NotQuiescent):
+            e.fork(2, quiesce_timeout=0.1)
+        # fork/save without options send exactly the 0.2 bodies (backward compatible)
+        Fake.calls.clear()
+        e.fork(2)
+        e.save()
+        bodies = [c[2] for c in Fake.calls if c[0] == "POST"]
+        self.assertEqual(bodies, [{"n": 2}, {}])
+        e.save("x", quiesce_timeout=5)
+        self.assertEqual(Fake.calls[-1][2], {"id": "x", "quiesce_timeout_s": 5})
 
     def test_valid_waits_for_pending(self):
         e = self.c.create()

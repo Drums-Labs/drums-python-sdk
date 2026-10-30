@@ -26,6 +26,19 @@ class Conflict(DrumsError):
     """409: the env's state does not allow this operation (e.g. step on a quarantined env)."""
 
 
+class NotQuiescent(Conflict):
+    """409 `not_quiescent`: fork/save/wait_quiescent found no moment when the env's process tree was safe to capture
+    (a process or thread kept starting or exiting, a task was exiting, or a zombie was not reaped) within the timeout.
+    Nothing was captured and the env is still ready. `unstable` lists what was unstable
+    ({kind, pid, tid, comm}, host pids); `quiescence` is the full record of the wait and of every dump attempt."""
+
+    def __init__(self, status: int, message: str, body=None):
+        super().__init__(status, message, body)
+        b = body if isinstance(body, dict) else {}
+        self.unstable = b.get("unstable") or []
+        self.quiescence = b.get("quiescence") or {}
+
+
 class DaemonUnavailable(DrumsError):
     """drumsd did not answer (down, restarting, network). For a POST the outcome is unknown: call env.refresh()."""
 
