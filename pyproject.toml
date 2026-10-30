@@ -1,6 +1,6 @@
 [project]
 name = "drums"
-version = "0.2.0"
+version = "0.2.1"
 description = "Drums SDK: isolated desktop environments for computer-use RL (client for drumsd)"
 requires-python = ">=3.9"
 license = {text = "Apache-2.0"}
