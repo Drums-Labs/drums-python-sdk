@@ -92,6 +92,8 @@ def _install_signal_exit():
 
 
 class Client:
+    """A connection to one drumsd (use drums.connect). Creates envs, lists them, and reads health and metrics."""
+
     def __init__(self, url: str = DEFAULT_URL, token: str | None = None, timeout: float = 900.0, retry_s: float = 60.0,
                  close_on_exit: bool = False, handle_signals: bool = False):
         self.url, self.timeout, self.retry_s = url.rstrip("/"), timeout, retry_s
@@ -221,7 +223,7 @@ class Client:
         return self.call("POST", "/v1/metrics/reset", {})
 
     def images(self) -> list:
-        """Checkpoints envs can be created from: installed images and saved states."""
+        """What envs can be created from: installed images and saved states (API: GET /v1/checkpoints)."""
         return self.call("GET", "/v1/checkpoints")
 
     def delete_state(self, state) -> dict:
@@ -476,7 +478,8 @@ class Env:
 
     # episode ----------------------------------------------------------------------------------------------------------
     def reset(self) -> "Env":
-        """New episode from this env's checkpoint (and the task's setup, for an env created with a task)."""
+        """New episode from the image or saved state this env was made from (and the task's setup, for an env created
+        with a task)."""
         self.record = self.client.call("POST", f"/v1/slots/{self.id}/reset")
         self.steps = 0
         self._last_fork = None
@@ -564,7 +567,7 @@ class Env:
 
     def metrics(self) -> dict:
         """This env's metrics: op latency (reset/step/fork/verify/...), episodes by verdict, failures and retries by
-        cause, rewards, lifetime, and its share of the host cost by slot-seconds."""
+        cause, rewards, lifetime, and its share of the host cost by env-seconds (API field: slot_seconds)."""
         return self.client.call("GET", f"/v1/slots/{self.id}/metrics")
 
     # branching --------------------------------------------------------------------------------------------------------

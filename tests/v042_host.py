@@ -238,9 +238,12 @@ def t_kill9():
     check("kill9", envs <= live_ids() and states <= state_ids(), case="trainer killed with SIGKILL; its envs and states are live", **ids)
     reap_every = c.health()["leases"]["defaults"]["reap_interval_s"]
     se = wait_until(lambda: not (envs & live_ids()), 30 + reap_every + 30, 1)
+    te = round(time.time() - t_kill, 1)
     ss = wait_until(lambda: not (states & state_ids()), 30 + reap_every + 30, 1)
-    check("kill9", se is not None, case="envs reaped", seconds_after_kill=round(time.time() - t_kill, 1) if se is not None else None)
-    check("kill9", ss is not None, case="states deleted (children_closed and idle)", seconds_after_kill=round(time.time() - t_kill, 1) if ss is not None else None)
+    ts = round(time.time() - t_kill, 1)
+    # envs: idle 30 s + up to one reap interval; the kept state: its own idle 30 s after its child closed
+    check("kill9", se is not None and te <= 30 + reap_every + 5, case="envs reaped (idle 30 s)", seconds_after_kill=te)
+    check("kill9", ss is not None, case="states deleted (children_closed at once, the kept one 30 s idle later)", seconds_after_kill=ts)
 
 
 def t_template_logs():
