@@ -104,8 +104,13 @@ class Fake(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         Fake.calls.append(("DELETE", self.path, None))
-        if self._authed():
-            self._send(200, slot(100, state="destroyed"))
+        if not self._authed():
+            return
+        if self.path.startswith("/v1/checkpoints/"):
+            if self.path.endswith("busy"):
+                return self._send(409, {"error": "checkpoint busy is used by envs [\"s1\"]"})
+            return self._send(200, {"id": self.path.rsplit("/", 1)[1], "deleted": True})
+        self._send(200, slot(100, state="destroyed"))
 
 
 def reward(valid=True, score=1.0, err=None):
@@ -223,6 +228,11 @@ class ClientTests(unittest.TestCase):
         res = drums.Client.map(lambda x: 1 / x, [1, 0])
         self.assertEqual(res[0], 1.0)
         self.assertIsInstance(res[1], ZeroDivisionError)
+
+    def test_delete_state(self):
+        self.assertTrue(self.c.delete_state(drums.State("s100-c101"))["deleted"])
+        with self.assertRaises(drums.Conflict):
+            self.c.delete_state("busy")
 
     def test_metrics(self):
         self.assertIn("cost", self.c.metrics())

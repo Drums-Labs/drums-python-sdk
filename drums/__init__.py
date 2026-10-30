@@ -107,6 +107,11 @@ class Client:
         """Checkpoints envs can be created from: installed images and saved states."""
         return self.call("GET", "/v1/checkpoints")
 
+    def delete_state(self, state) -> dict:
+        """Delete a saved state (from save() or fork()): its template server stops and its images are freed. Refused
+        (Conflict) while an env made from it still exists. States are not deleted automatically."""
+        return self.call("DELETE", f"/v1/checkpoints/{urllib.parse.quote(str(state))}")
+
     def tasks(self, domain: str | None = None) -> list:
         q = "?" + urllib.parse.urlencode({"domain": domain}) if domain else ""
         return self.call("GET", "/v1/tasks" + q)
@@ -240,6 +245,7 @@ class Env:
     state = property(lambda self: self.record.get("state"))
     validity = property(lambda self: self.record.get("validity") or {})
     task = property(lambda self: self.record.get("task"))
+    from_state = property(lambda self: State(self.record.get("checkpoint")))     # the checkpoint this env restores to
 
     def refresh(self) -> dict:
         self.record = self.client.call("GET", f"/v1/slots/{self.id}")
