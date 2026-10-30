@@ -39,5 +39,35 @@ class PrivateCache(unittest.TestCase):
         self.assertIn("env.setup_controller.reset_cache_dir(env.cache_dir)", src)
 
 
+class ForkServer(unittest.TestCase):
+    def test_requests_go_through_the_server_and_fall_back_without_it(self):
+        import subprocess
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            osd = os.path.join(d, "osworld")
+            for m in ("desktop_env", "desktop_env/controllers", "desktop_env/evaluators"):
+                os.makedirs(os.path.join(osd, m), exist_ok=True)
+                open(os.path.join(osd, m, "__init__.py"), "w").close()
+            for m in ("controllers/python", "controllers/setup", "desktop_env", "evaluators/getters", "evaluators/metrics"):
+                open(os.path.join(osd, "desktop_env", m + ".py"), "w").close()
+            sock = os.path.join(d, "osw.sock")
+            self.assertIsNone(osw.via_server("stage", {}, sock))           # no server: the caller does the work
+            p = subprocess.Popen([sys.executable, "-I", osw.__file__, "serve", "--osworld-dir", osd, "--sock", sock],
+                                 stderr=subprocess.PIPE)
+            try:
+                for _ in range(100):
+                    if os.path.exists(sock):
+                        break
+                    time.sleep(0.05)
+                req = {"task": {"id": "t1"}, "cache_dir": os.path.join(d, "cache")}
+                outs = [osw.via_server("stage", req, sock) for _ in range(5)]
+                self.assertTrue(all(o["ok"] and o["staged"] == [] for o in outs), outs)
+                bad = osw.via_server("evaluate", {"task": {"id": "t1"}, "cache_dir": os.path.join(d, "cache")}, sock)
+                self.assertFalse(bad["ok"])                                 # a failing worker still answers
+            finally:
+                p.kill()
+                p.wait()
+
+
 if __name__ == "__main__":
     unittest.main()
