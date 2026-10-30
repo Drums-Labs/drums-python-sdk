@@ -51,6 +51,18 @@ class NotQuiescent(Conflict):
         self.quiescence = b.get("quiescence") or {}
 
 
+class CheckpointStale(Conflict):
+    """409 `checkpoint_stale`: the installed image's checkpoint was made by other runtime sources or another image
+    inspection than this drumsd runs with (e.g. an upgrade that changed how the desktop logs in). drumsd refuses envs
+    from it; run the installer again, which provisions the origin anew. `provenance` is the checkpoint's, `current` drumsd's."""
+
+    def __init__(self, status: int, message: str, body=None):
+        super().__init__(status, message, body)
+        b = body if isinstance(body, dict) else {}
+        self.provenance = b.get("provenance")
+        self.current = b.get("current")
+
+
 class DaemonUnavailable(DrumsError):
     """drumsd did not answer (down, restarting, network). For a POST the outcome is unknown: call env.refresh()."""
 

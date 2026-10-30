@@ -61,6 +61,9 @@ class Fake(BaseHTTPRequestHandler):
                 return self._send(201, slot(9, state="quarantined", reason="gate state_hash failed: {...}"))
             if ck == "crash":
                 return self._send(201, slot(9, state="down", reason="criu restore failed", last_error="criu restore failed (exit 1)"))
+            if ck == "stale":
+                return self._send(409, {"error": "checkpoint stale is stale: made before provenance was recorded", "code": "checkpoint_stale",
+                                        "provenance": None, "current": {"source_sha256": "a", "inspection_sha256": "i"}})
             if ck == "setupfail":
                 return self._send(201, slot(9, state="down", last_error="task setup failed: download"))
             if b.get("task") and not isinstance(b["task"], dict):
@@ -114,6 +117,17 @@ class Fake(BaseHTTPRequestHandler):
             return self._send(200, {"slot": "s100", "usage": {"ops": {}}})
         if self.path.startswith("/v1/slots/"):
             return self._send(200, slot(100, task={"id": "abc", "instruction": "do it"}))
+        if self.path.startswith("/v1/slots"):
+            # drumsd 0.4: 7 envs s100..s106, s100/s103/s106 destroyed; the plain call lists live ones, any query the paged form
+            import urllib.parse as up
+            allr = [slot(100 + i, state="destroyed" if i % 3 == 0 else "ready") for i in range(7)]
+            if "?" not in self.path:
+                return self._send(200, [r for r in allr if r["state"] != "destroyed"])
+            q = dict(up.parse_qsl(self.path.split("?", 1)[1]))
+            rows = [r for r in allr if q.get("include_destroyed") == "true" or r["state"] != "destroyed"]
+            rows = [r for r in rows if not q.get("after") or r["id"] > q["after"]]
+            n = int(q.get("limit", 500))
+            return self._send(200, {"items": rows[:n], "next_after": rows[n - 1]["id"] if len(rows) > n else None})
         self._send(404, {"error": "no slot"})
 
     def do_DELETE(self):
@@ -319,6 +333,20 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(e.step("pyautogui.moveTo(1, 1)").result["returncode"], 0)
         with self.assertRaises(drums.GuestError):                   # GuestClient keeps its allow_rc contract
             e.guest().execute("raise", allow_rc=(0,))
+
+    def test_env_listing_live_by_default_and_paged_history(self):
+        self.assertEqual([e.id for e in self.c.envs()], ["s101", "s102", "s104", "s105"])
+        self.assertEqual([r["id"] for r in self.c.env_records(page_size=3)], ["s101", "s102", "s104", "s105"])
+        n = len([c for c in Fake.calls if c[1].startswith("/v1/slots?")])
+        allr = [r["id"] for r in self.c.env_records(include_destroyed=True, page_size=2)]
+        self.assertEqual(allr, [f"s{100 + i}" for i in range(7)])
+        self.assertEqual(len([c for c in Fake.calls if c[1].startswith("/v1/slots?")]) - n, 4)      # 2+2+2+1
+
+    def test_stale_checkpoint_is_typed(self):
+        with self.assertRaises(drums.CheckpointStale) as cm:
+            self.c.create(image="stale")
+        self.assertIsInstance(cm.exception, drums.Conflict)
+        self.assertEqual(cm.exception.current["inspection_sha256"], "i")
 
     def test_guest_adapter(self):
         g = self.c.create().guest()

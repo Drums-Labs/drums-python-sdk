@@ -28,16 +28,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerError, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
+from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerError, CheckpointStale, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
                      ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RestoreFailed, TaskSetupFailed)
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or "http://127.0.0.1:7070"
 DEFAULT_IMAGE = "osworld-ubuntu"
 
 __all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "env", "__version__",
            "DrumsError", "AuthError", "BadRequest", "NotFound", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
-           "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded"]
+           "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded",
+           "CheckpointStale"]
 
 _STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 422: BadRequest, 429: Overloaded, 502: GuestError, 503: DaemonUnavailable}
 
@@ -85,6 +86,8 @@ class Client:
                     cls = _STATUS.get(e.code, DrumsError)
                     if e.code == 409 and isinstance(body_j, dict) and body_j.get("code") == "not_quiescent":
                         cls = NotQuiescent
+                    if e.code == 409 and isinstance(body_j, dict) and body_j.get("code") == "checkpoint_stale":
+                        cls = CheckpointStale
                     raise cls(e.code, msg, body_j) from None
             except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
                 if time.monotonic() >= deadline:
@@ -124,7 +127,25 @@ class Client:
         return self.call("GET", f"/v1/tasks/{urllib.parse.quote(task_id)}")
 
     def envs(self) -> list:
+        """The live envs (drumsd >= 0.4 lists only those; older ones list every env, so destroyed ones are dropped here)."""
         return [Env(self, r) for r in self.call("GET", "/v1/slots") if r.get("state") != "destroyed"]
+
+    def env_records(self, include_destroyed: bool = False, page_size: int = 500):
+        """Every env record, live ones only or with the destroyed ones (their records are kept), as a generator over
+        pages of `page_size` (GET /v1/slots?limit=&after=&include_destroyed=). An older drumsd answers with one list."""
+        after = None
+        while True:
+            q = {"include_destroyed": "true" if include_destroyed else "false", "limit": str(page_size)}
+            if after:
+                q["after"] = after
+            r = self.call("GET", "/v1/slots?" + urllib.parse.urlencode(q))
+            if isinstance(r, list):              # drumsd < 0.4: no paging, every env
+                yield from (x for x in r if include_destroyed or x.get("state") != "destroyed")
+                return
+            yield from r.get("items") or []
+            after = r.get("next_after")
+            if not after:
+                return
 
     def _task(self, task):
         if task is None or isinstance(task, dict):
