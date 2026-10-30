@@ -298,6 +298,22 @@ class Env:
                 return False
             time.sleep(0.25)
 
+    def wait_valid(self, timeout: float = 60.0) -> "Env":
+        """Block until this episode's last gate (processes alive 5 s after resume) has resolved. Raises GateFailed if the
+        episode is invalid. Act after this when your first actions may end processes: a process that exits in the first
+        seconds after a restore cannot be told apart from a bad restore, so the episode would be flagged invalid."""
+        t0 = time.monotonic()
+        while True:
+            g = self.gates()
+            v = g["validity"]["verdict"]
+            if v == "valid":
+                return self
+            if v == "invalid":
+                raise GateFailed(self.refresh())
+            if time.monotonic() - t0 > timeout:
+                raise DrumsError(0, f"env {self.id}: verdict still pending after {timeout} s")
+            time.sleep(0.25)
+
     def verify(self, strict: bool = True) -> Reward:
         """Run the task's checker on the current state. The server waits for the episode's last gate first.
         strict=True: raises InvalidEpisode (reward attached, flagged) if the episode is not valid, CheckerError if the
