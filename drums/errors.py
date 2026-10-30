@@ -26,6 +26,18 @@ class Conflict(DrumsError):
     """409: the env's state does not allow this operation (e.g. step on a quarantined env)."""
 
 
+class Overloaded(DrumsError):
+    """429 `overloaded`: drumsd refused a create, save or fork because the host is near its memory limit (or under
+    memory pressure, or the state tmpfs is nearly full). Nothing was started; try again later. `reason` is memory,
+    memory_pressure or state_space; `admission` has the numbers (available, in flight, needed, floor)."""
+
+    def __init__(self, status: int, message: str, body=None):
+        super().__init__(status, message, body)
+        b = body if isinstance(body, dict) else {}
+        self.reason = b.get("reason")
+        self.admission = b.get("admission") or {}
+
+
 class NotQuiescent(Conflict):
     """409 `not_quiescent`: fork/save/wait_quiescent found no moment when the env's process tree was safe to capture
     (a process or thread kept starting or exiting, a task was exiting, or a zombie was not reaped) within the timeout.

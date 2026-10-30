@@ -54,6 +54,9 @@ class Fake(BaseHTTPRequestHandler):
             return
         if self.path == "/v1/slots":
             ck = b["checkpoint"]
+            if ck == "full":
+                return self._send(429, {"error": "overloaded: create refused: 41000 MiB available ...", "code": "overloaded",
+                                        "reason": "memory", "admission": {"need_mib": 1024, "floor_mib": 40000}})
             if ck == "broken":
                 return self._send(201, slot(9, state="quarantined", reason="gate state_hash failed: {...}"))
             if ck == "crash":
@@ -293,6 +296,14 @@ class ClientTests(unittest.TestCase):
                 Fake.step_delay = 0.0
         took = asyncio.run(main())
         self.assertLess(took, 3 * delay, f"{n} concurrent steps of {delay} s took {took:.2f} s")
+
+    def test_overloaded_is_typed_and_not_retried(self):
+        n = len([c for c in Fake.calls if c[1] == "/v1/slots"])
+        with self.assertRaises(drums.Overloaded) as cm:
+            self.c.create(image="full")
+        self.assertEqual(cm.exception.reason, "memory")
+        self.assertEqual(cm.exception.admission["floor_mib"], 40000)
+        self.assertEqual(len([c for c in Fake.calls if c[1] == "/v1/slots"]), n + 1)     # a POST is never retried
 
     def test_guest_adapter(self):
         g = self.c.create().guest()

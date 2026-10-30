@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 
 from .errors import (AuthError, BadRequest, BatchError, CheckerError, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
-                     ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, NotQuiescent, RestoreFailed, TaskSetupFailed)
+                     ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RestoreFailed, TaskSetupFailed)
 
 __version__ = "0.2.1"
 DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or "http://127.0.0.1:7070"
@@ -37,9 +37,9 @@ DEFAULT_IMAGE = "osworld-ubuntu"
 
 __all__ = ["connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "env", "__version__",
            "DrumsError", "AuthError", "BadRequest", "NotFound", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
-           "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent"]
+           "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded"]
 
-_STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 422: BadRequest, 502: GuestError, 503: DaemonUnavailable}
+_STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 422: BadRequest, 429: Overloaded, 502: GuestError, 503: DaemonUnavailable}
 
 
 def connect(url: str | None = None, token: str | None = None, *, timeout: float = 900.0, retry_s: float = 60.0, check: bool = True) -> "Client":
