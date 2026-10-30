@@ -59,6 +59,21 @@ class GuestError(DrumsError):
     """502: the desktop's guest server did not answer or refused the action."""
 
 
+class ActionFailed(GuestError):
+    """step(): the action ran in the desktop and exited non-zero (a pyautogui action that raised, a command that
+    failed). Before 0.2.2 step() returned such a result without raising, so a failed action looked like a done one.
+    `returncode`, `output` and `error` are the guest's; `result` is the whole guest reply. step(..., check=False)
+    returns it instead (for commands whose exit status is the answer, e.g. `test -f`)."""
+
+    def __init__(self, result: dict, action):
+        self.result = result or {}
+        self.returncode = self.result.get("returncode")
+        self.output = self.result.get("output")
+        self.error = self.result.get("error")
+        self.action = action
+        super().__init__(0, f"action exited {self.returncode}: {str(self.error or '')[-400:]!r}", self.result)
+
+
 class EnvFailed(DrumsError):
     """A create/reset/fork child did not come up ready. `record` is the env record, `gates` its gate report,
     `cause` the failed gate or error. The env is down or quarantined on the server; nothing was retried beyond

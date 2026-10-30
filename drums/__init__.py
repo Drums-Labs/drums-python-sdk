@@ -28,14 +28,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .errors import (AuthError, BadRequest, BatchError, CheckerError, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
+from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerError, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
                      ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RestoreFailed, TaskSetupFailed)
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or "http://127.0.0.1:7070"
 DEFAULT_IMAGE = "osworld-ubuntu"
 
-__all__ = ["connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "env", "__version__",
+__all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "env", "__version__",
            "DrumsError", "AuthError", "BadRequest", "NotFound", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
            "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded"]
 
@@ -274,11 +274,18 @@ class Env:
         self._check_up()
         return self
 
-    def step(self, action, screenshot: bool = False) -> StepResult:
+    def step(self, action, screenshot: bool = False, check: bool = True) -> StepResult:
         """pyautogui code (str) or an action dict: {"type": "pyautogui", "code"}, {"type": "execute", "command", "shell"},
-        {"type": "launch", "command", "shell"}, {"type": "sleep", "seconds"}."""
-        r = self.client.call("POST", f"/v1/slots/{self.id}/step", {"action": _action(action), "screenshot": screenshot})
+        {"type": "launch", "command", "shell"}, {"type": "sleep", "seconds"}.
+        check=True (default): an action that ran and exited non-zero raises ActionFailed with its exit status, output
+        and error; check=False returns the result as is. A guest that does not answer or times out (120 s) raises
+        GuestError either way."""
+        a = _action(action)
+        r = self.client.call("POST", f"/v1/slots/{self.id}/step", {"action": a, "screenshot": screenshot})
         self.steps += 1
+        res = r.get("result")
+        if check and isinstance(res, dict) and res.get("returncode") not in (None, 0):
+            raise ActionFailed(res, a)
         if r.get("screenshot_png_b64"):
             png = base64.b64decode(r.pop("screenshot_png_b64"))
             r["screenshot_png"] = png
@@ -434,7 +441,7 @@ class GuestClient:
         self.env, self.base, self.timeout = env, f"{env.client.url}/v1/slots/{env.id}", env.client.timeout
 
     def execute(self, command, shell: bool = False, allow_rc=(0,), timeout=None) -> dict:
-        r = self.env.step({"type": "execute", "command": command, "shell": shell})["result"]
+        r = self.env.step({"type": "execute", "command": command, "shell": shell}, check=False)["result"]
         if allow_rc is not None and r.get("returncode") not in allow_rc:
             raise GuestError(0, f"guest command rc={r.get('returncode')} err={str(r.get('error'))[:300]!r}")
         return r

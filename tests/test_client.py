@@ -70,6 +70,9 @@ class Fake(BaseHTTPRequestHandler):
             return self._send(200, slot(100, episode=2))
         if self.path.endswith("/step"):
             time.sleep(Fake.step_delay)
+            if "raise" in json.dumps(b.get("action")):
+                return self._send(200, {"result": {"status": "success", "returncode": 1, "output": "", "error": "Traceback ... ValueError"},
+                                        "episode": 2, "validity": {"verdict": "pending"}, "seconds": 0.1})
             return self._send(200, {"result": {"status": "success", "returncode": 0}, "screenshot_png_b64": __import__("base64").b64encode(PNG).decode(),
                                     "episode": 2, "validity": {"verdict": "pending"}, "seconds": 0.1})
         if self.path.endswith("/capture"):
@@ -304,6 +307,18 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(cm.exception.reason, "memory")
         self.assertEqual(cm.exception.admission["floor_mib"], 40000)
         self.assertEqual(len([c for c in Fake.calls if c[1] == "/v1/slots"]), n + 1)     # a POST is never retried
+
+    def test_a_failed_action_raises_with_its_exit_status(self):
+        e = self.c.create()
+        with self.assertRaises(drums.ActionFailed) as cm:
+            e.step("raise ValueError()")
+        self.assertEqual(cm.exception.returncode, 1)
+        self.assertIn("ValueError", cm.exception.error)
+        r = e.step("raise ValueError()", check=False)              # opt out: the exit status is the answer
+        self.assertEqual(r.result["returncode"], 1)
+        self.assertEqual(e.step("pyautogui.moveTo(1, 1)").result["returncode"], 0)
+        with self.assertRaises(drums.GuestError):                   # GuestClient keeps its allow_rc contract
+            e.guest().execute("raise", allow_rc=(0,))
 
     def test_guest_adapter(self):
         g = self.c.create().guest()
