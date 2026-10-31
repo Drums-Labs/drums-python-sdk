@@ -83,6 +83,7 @@ def main(out):
               and any("before the crash watch" in s for s in crash["detail"]["incomplete"]), env=e.id, validity=g["validity"])
     e2.reset()
     check("A_next_reset_valid", e2.valid(timeout=30), env=e2.id, episode=e2.episode)
+    pids[e2.id] = e2.refresh()["init_pid"]          # its new tree: B checks that this one is left alone
 
     # ---- B
     old = drumsd_pid()
