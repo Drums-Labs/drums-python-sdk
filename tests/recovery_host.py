@@ -78,7 +78,7 @@ def main(out):
         s = e.step({"type": "execute", "command": "echo alive", "shell": True})
         check("A_env_steps_after_restart", s.result.get("output", "").strip() == "alive", env=e.id)
         g = e.gates()
-        crash = next((x for x in g["gates"] if x["gate"] == "no_app_crash"), None)
+        crash = next((x for x in g["gates"]["gates"] if x["gate"] == "no_app_crash"), None)
         check("A_adopted_episode_is_not_vouched_for", g["validity"]["verdict"] == "invalid" and crash is not None
               and any("before the crash watch" in s for s in crash["detail"]["incomplete"]), env=e.id, validity=g["validity"])
     e2.reset()
