@@ -46,9 +46,18 @@ e.close()
 # A. during setup: a task whose config launches the hog
 t = dict(c.task(TASK))
 t["config"] = list(t.get("config") or []) + [{"type": "launch", "parameters": {"command": ["python3", "-c", HOG % 0]}}]
-e = c.create(task=t).wait_valid()
-time.sleep(25)
-R["A_during_setup"] = reward(e)
+e = c.create(task=t)
+try:
+    e.wait_valid()
+    time.sleep(25)
+    R["A_during_setup"] = reward(e)
+except drums.GateFailed:
+    # since no_app_crash (daily-use): a kill during setup can already make the episode invalid before it is handed out
+    # (Chrome dies of SIGTRAP under the same memory pressure); the env is never valid, and no_oom_kill is named
+    r = e.refresh()
+    bad = [g["gate"] for g in (r.get("gates") or {}).get("gates", []) if g.get("status") == "fail"]
+    R["A_during_setup"] = {"score": None, "valid": False, "verdict": (r.get("validity") or {}).get("verdict"), "bad_gates": bad,
+                           "invalid_at": "wait_valid"}
 e.close()
 R["pass"] = R["C_control"]["valid"] and oom_in(R["B_after_last_step"]) and oom_in(R["A_during_setup"])
 json.dump(R, open(sys.argv[1] if len(sys.argv) > 1 else "/tmp/oom_host.json", "w"), indent=1)
