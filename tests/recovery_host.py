@@ -1,7 +1,8 @@
 """Failure-recovery tests against a real installed drumsd (run on the host as root):
 
   A. drumsd SIGKILLed while idle: systemd restarts it; the SDK's GETs ride over the restart; running envs are adopted
-     (same init pid, still ready and valid) and take steps.
+     (same init pid, still ready) and take steps. Their current episode ends invalid (`no_app_crash`: it started before
+     the new daemon's crash watch, which cannot vouch for the time drumsd was down); the next reset is valid.
   B. drumsd SIGKILLed in the middle of a reset: the SDK's POST surfaces DaemonUnavailable (outcome unknown); after the
      restart the env is `down` (reconciled, its tree killed); the next reset is valid.
   C. a restore that crashes (every process of the slot's cgroups killed while CRIU restores): the reset surfaces as
@@ -72,10 +73,16 @@ def main(out):
     check("A_restart_seen_by_sdk", h["ok"] and new != old, seconds=round(time.monotonic() - t0, 2), old=old, new=new)
     for e in (e1, e2):
         r = e.refresh()
-        check("A_env_adopted", r["state"] == "ready" and r["init_pid"] == pids[e.id] and r["validity"]["verdict"] == "valid",
+        check("A_env_adopted", r["state"] == "ready" and r["init_pid"] == pids[e.id],
               env=e.id, state=r["state"], pid=r["init_pid"], verdict=r["validity"]["verdict"])
         s = e.step({"type": "execute", "command": "echo alive", "shell": True})
         check("A_env_steps_after_restart", s.result.get("output", "").strip() == "alive", env=e.id)
+        g = e.gates()
+        crash = next((x for x in g["gates"] if x["gate"] == "no_app_crash"), None)
+        check("A_adopted_episode_is_not_vouched_for", g["validity"]["verdict"] == "invalid" and crash is not None
+              and any("before the crash watch" in s for s in crash["detail"]["incomplete"]), env=e.id, validity=g["validity"])
+    e2.reset()
+    check("A_next_reset_valid", e2.valid(timeout=30), env=e2.id, episode=e2.episode)
 
     # ---- B
     old = drumsd_pid()
