@@ -18,6 +18,18 @@ class BadRequest(DrumsError):
     """400: the request is wrong (bad task JSON, bad id, n out of range)."""
 
 
+class TaskUnsupported(BadRequest):
+    """422 `task_unsupported`: the task needs the agent itself to act as root, and agents get no privilege escalation
+    in this execution profile (docs/custom-tasks.md). Nothing was started. `task_id` and `reason` say which and why.
+    A task whose setup alone needs root is supported: drumsd runs that step as trusted provisioning."""
+
+    def __init__(self, status: int, message: str, body=None):
+        super().__init__(status, message, body)
+        b = body if isinstance(body, dict) else {}
+        self.task_id = b.get("task_id")
+        self.reason = b.get("reason")
+
+
 class NotFound(DrumsError):
     """404: no such env, image, state or task."""
 

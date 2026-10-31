@@ -77,6 +77,9 @@ class Fake(BaseHTTPRequestHandler):
             if ck == "stale":
                 return self._send(409, {"error": "checkpoint stale is stale: made before provenance was recorded", "code": "checkpoint_stale",
                                         "provenance": None, "current": {"source_sha256": "a", "inspection_sha256": "i"}})
+            if ck == "agentroot":
+                return self._send(422, {"error": "task 5812b315 is unsupported in this execution profile: agent root", "code": "task_unsupported",
+                                        "task_id": "5812b315-e7bd-4265-b51f-863c02174c28", "reason": "agent root is not available"})
             if ck == "setupfail":
                 return self._send(201, slot(9, state="down", last_error="task setup failed: download"))
             if b.get("task") and not isinstance(b["task"], dict):
@@ -362,6 +365,13 @@ class ClientTests(unittest.TestCase):
             self.c.create(image="stale")
         self.assertIsInstance(cm.exception, drums.Conflict)
         self.assertEqual(cm.exception.current["inspection_sha256"], "i")
+
+    def test_a_task_that_needs_agent_root_is_typed(self):
+        with self.assertRaises(drums.TaskUnsupported) as cm:
+            self.c.create(image="agentroot")
+        self.assertIsInstance(cm.exception, drums.BadRequest)
+        self.assertEqual(cm.exception.task_id, "5812b315-e7bd-4265-b51f-863c02174c28")
+        self.assertIn("agent root", cm.exception.reason)
 
     def test_guest_adapter(self):
         g = self.c.create().guest()

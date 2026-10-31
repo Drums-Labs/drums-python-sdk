@@ -44,16 +44,17 @@ import threading
 import warnings
 
 from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerError, CheckpointStale, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
-                     EnvGone, ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RestoreFailed, TaskSetupFailed)
+                     EnvGone, ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RestoreFailed, TaskSetupFailed,
+                     TaskUnsupported)
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or "http://127.0.0.1:7070"
 DEFAULT_IMAGE = "osworld-ubuntu"
 
 __all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "ForkResult", "env", "__version__",
            "DrumsError", "AuthError", "BadRequest", "NotFound", "EnvGone", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
            "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded",
-           "CheckpointStale"]
+           "CheckpointStale", "TaskUnsupported"]
 
 _STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 410: EnvGone, 422: BadRequest, 429: Overloaded, 502: GuestError,
            503: DaemonUnavailable}
@@ -197,6 +198,8 @@ class Client:
                         cls = NotQuiescent
                     if e.code == 409 and isinstance(body_j, dict) and body_j.get("code") == "checkpoint_stale":
                         cls = CheckpointStale
+                    if e.code == 422 and isinstance(body_j, dict) and body_j.get("code") == "task_unsupported":
+                        cls = TaskUnsupported
                     if e.code == 409 and "slot is destroyed" in str(msg):      # drumsd < 0.4.2
                         cls = EnvGone
                     raise cls(e.code, msg, body_j) from None
