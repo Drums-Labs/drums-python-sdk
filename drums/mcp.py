@@ -5,7 +5,7 @@
 
 Tools: everything in drums.hybrid.TOOLS (gui, screenshot, shell, read_file, write_file, list_dir, office_convert,
 spreadsheet_read, browser_tabs, browser_open) plus `verify` (the task's reward with its audit). Screenshots come back as
-MCP image content. Uses DRUMS_URL / DRUMS_TOKEN / DRUMS_TOKEN_FILE like drums.connect(). Standard library only.
+MCP image content. Token: $DRUMS_TOKEN, else the file $DRUMS_TOKEN_FILE, else /etc/drums/token; URL: $DRUMS_URL. Standard library only.
 """
 from __future__ import annotations
 
@@ -88,7 +88,12 @@ def main(argv=None):
     g.add_argument("--create", action="store_true")
     ap.add_argument("--task")
     a = ap.parse_args(argv)
-    c = connect()
+    import os
+    tok = os.environ.get("DRUMS_TOKEN")
+    tf = os.environ.get("DRUMS_TOKEN_FILE") or ("/etc/drums/token" if os.access("/etc/drums/token", os.R_OK) else None)
+    if tok is None and tf:
+        tok = open(tf).read().strip()
+    c = connect(os.environ.get("DRUMS_URL"), tok, close_on_exit=bool(a.create))
     if a.env:
         from . import Env
         env = Env(c, c.call("GET", f"/v1/slots/{a.env}"))
