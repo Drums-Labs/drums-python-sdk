@@ -235,6 +235,17 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(drums.CheckerError):
             e.verify()
 
+    def test_the_reward_audit_reaches_the_caller(self):
+        e = self.c.create()
+        Fake.verify_reply = reward(valid=True, score=1.0)
+        r = e.verify()
+        self.assertEqual((r.audit, r.audit_flags, r.trusted), ({}, [], None))      # an older drumsd: unknown, not trusted
+        Fake.verify_reply = dict(reward(valid=True, score=1.0), audit={"version": 1, "flags": ["scope_violation"], "trusted": False,
+                                                                       "scope": {"ran": True, "violations": 1}})
+        r = e.verify()
+        self.assertEqual((r.score, r.trusted, r.audit_flags), (1.0, False, ["scope_violation"]))
+        self.assertEqual(r.audit["scope"]["violations"], 1)
+
     def test_fork_reports_failed_children(self):
         e = self.c.create()
         kids = e.fork(2)

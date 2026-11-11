@@ -422,6 +422,12 @@ class Reward:
         self.checker_skipped = d.get("checker_skipped")     # e.g. "quarantined: client": the checker did not run
         self.gates = d.get("gates")
         self.seconds = d.get("seconds")
+        # the reward audit (drumsd >= sota/t6): recheck, redundant checker, scope (reward-hacking signal), checker
+        # timeout/crash. `trusted` is True only for a valid episode with a score and no audit flag; an older drumsd
+        # sends no audit, so `trusted` is None (unknown), never True.
+        self.audit = d.get("audit") or {}
+        self.audit_flags = list(self.audit.get("flags") or [])
+        self.trusted = self.audit.get("trusted") if self.audit else None
         # why the episode is not valid, in words (empty when valid). drumsd >= 0.4.2 sends them; for an older one
         # they are derived, and a quarantined env's "valid" verdict (the old inconsistency) is reported as invalid.
         self.invalid_reasons = list(d.get("invalid_reasons") or [])
