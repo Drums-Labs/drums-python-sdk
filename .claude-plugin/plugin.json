@@ -1,0 +1,6 @@
+{
+  "name": "drums",
+  "description": "Isolated desktops for computer-use agents: start a computer from a template, act with GUI, shell and files, verify against a task checker, fork and reset, and read run results, all through the Drums MCP server.",
+  "version": "0.3.0",
+  "author": { "name": "Drums Labs" }
+}
