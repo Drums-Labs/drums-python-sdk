@@ -94,6 +94,8 @@ class Fake(BaseHTTPRequestHandler):
                                         "episode": 2, "validity": {"verdict": "pending"}, "seconds": 0.1})
             return self._send(200, {"result": {"status": "success", "returncode": 0}, "screenshot_png_b64": __import__("base64").b64encode(PNG).decode(),
                                     "episode": 2, "validity": {"verdict": "pending"}, "seconds": 0.1})
+        if self.path.endswith("/prefork"):
+            return self._send(202, {"state": "preparing", "n": b.get("n")})
         if self.path.endswith("/capture"):
             return self._send(200, {"id": "s100-c101"})
         if self.path.endswith("/quiescent") or (self.path.endswith("/branch") and b.get("quiesce_timeout_s") == 0.1):
@@ -438,6 +440,16 @@ class ClientTests(unittest.TestCase):
             pass
         self.assertEqual([c[1] for c in Fake.calls[-2:]], ["/v1/slots/s103", "/v1/slots/s104"])
         self.assertTrue(all(c[0] == "DELETE" for c in Fake.calls[-2:]), "the with-block closes the children")
+
+    def test_prefork_sends_the_fork_body_and_returns_the_reply(self):
+        e = self.c.create()
+        Fake.calls.clear()
+        r = e.prefork(4)
+        self.assertEqual(Fake.calls[-1][:2], ("POST", "/v1/slots/s100/prefork"))
+        self.assertEqual(Fake.calls[-1][2], {"n": 4}, "no option: just n")
+        self.assertEqual(r["n"], 4)
+        e.prefork(2, quiesce_timeout=0.5, keep_state=False, idle_timeout=120, state_ttl=60)
+        self.assertEqual(Fake.calls[-1][2], {"n": 2, "quiesce_timeout_s": 0.5, "delete_state_with_children": True, "idle_timeout_s": 120, "state_ttl_s": 60})
 
     def test_leases_are_sent_only_when_set(self):
         Fake.calls.clear()
