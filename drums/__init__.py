@@ -47,7 +47,7 @@ from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerErr
                      EnvGone, ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RestoreFailed, TaskSetupFailed,
                      TaskUnsupported)
 
-__version__ = "0.2.5"
+__version__ = "0.3.0"
 DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or "http://127.0.0.1:7070"
 DEFAULT_IMAGE = "osworld-ubuntu"
 
@@ -168,11 +168,12 @@ class Client:
         self.close()
 
     # transport --------------------------------------------------------------------------------------------------------
-    def call(self, method: str, path: str, body=None, raw: bool = False, timeout: float | None = None):
+    def call(self, method: str, path: str, body=None, raw: bool = False, timeout: float | None = None, headers: dict | None = None):
         """One request. GETs are retried while drumsd is unreachable (up to retry_s: a restarting drumsd comes back and
-        reconciles); other methods are never retried, since their outcome is unknown after a dropped connection."""
+        reconciles); other methods are never retried, since their outcome is unknown after a dropped connection.
+        `headers` are added to the request (e.g. Idempotency-Key)."""
         data = None if body is None else json.dumps(body).encode()
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **(headers or {})}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         deadline = time.monotonic() + (self.retry_s if method == "GET" else 0.0)
@@ -265,6 +266,46 @@ class Client:
             after = r.get("next_after")
             if not after:
                 return
+
+    # gateway: runs, API keys, audit log ---------------------------------------------------------------------------------
+    # These routes exist on the Drums gateway only; a plain drumsd answers 404 (NotFound).
+    def runs(self, kind: str | None = None, status: str | None = None, limit: int = 50) -> dict:
+        """The workspace's runs, newest first (GET /v1/runs): {"items": [run rows], "next_cursor"}. `kind` filters
+        (e.g. "evaluation"), `status` too (queued, running, completed, failed, cancelled)."""
+        q = {k: v for k, v in (("kind", kind), ("status", status), ("limit", limit)) if v is not None}
+        return self.call("GET", "/v1/runs?" + urllib.parse.urlencode(q))
+
+    def create_run(self, spec: dict, idempotency_key: str | None = None) -> dict:
+        """Submit a RunSpec (POST /v1/runs): {"run_id", "operation_id", "status", "created"}. With `idempotency_key`
+        (the Idempotency-Key header) the same key with the same spec returns the same run."""
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        return self.call("POST", "/v1/runs", spec, headers=headers)
+
+    def run(self, run_id: str) -> dict:
+        """One run (GET /v1/runs/{id}): its row, the attempts summary and the last events."""
+        return self.call("GET", f"/v1/runs/{urllib.parse.quote(str(run_id))}")
+
+    def api_keys(self) -> dict:
+        """The workspace's API keys, metadata only (GET /v1/api-keys): {"items": [{id, name, prefix, scopes, ...}]}."""
+        return self.call("GET", "/v1/api-keys")
+
+    def create_api_key(self, name: str, scopes: list, expires_in_days: int | None = None) -> dict:
+        """A new API key (POST /v1/api-keys): {"id", "prefix", "key", "expires_at"}. `key` is the plaintext, shown
+        once; the scopes cannot exceed this client's own."""
+        body = {"name": name, "scopes": list(scopes)}
+        if expires_in_days is not None:
+            body["expires_in_days"] = expires_in_days
+        return self.call("POST", "/v1/api-keys", body)
+
+    def revoke_api_key(self, key_id: str) -> dict:
+        """Revoke an API key (DELETE /v1/api-keys/{id}): {"id", "revoked_at"}. A key cannot revoke itself."""
+        return self.call("DELETE", f"/v1/api-keys/{urllib.parse.quote(str(key_id))}")
+
+    def audit(self, action: str | None = None, limit: int = 50, cursor: str | None = None) -> dict:
+        """The workspace's audit log, newest first (GET /v1/audit): {"items": [events], "next_cursor"}. `action`
+        filters by prefix (e.g. "mcp", "computer.create")."""
+        q = {k: v for k, v in (("action", action), ("limit", limit), ("cursor", cursor)) if v is not None}
+        return self.call("GET", "/v1/audit?" + urllib.parse.urlencode(q))
 
     def _task(self, task):
         if task is None or isinstance(task, dict):
