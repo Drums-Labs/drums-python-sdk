@@ -299,7 +299,7 @@
         "type": "object",
         "properties": {
           "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "code": { "type": "string", "minLength": 1, "maxLength": 20000 }
+          "code": { "type": "string", "minLength": 1, "maxLength": 16384 }
         },
         "required": ["computer_id", "code"],
         "additionalProperties": false
