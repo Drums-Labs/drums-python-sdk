@@ -74,7 +74,9 @@ class Mcp(unittest.TestCase):
     def test_json_rpc_session(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
-            srv = mcp.Server(FakeEnv(d))
+            fake = FakeEnv(d)
+            # bound to one desktop (--env s1): desktop tools need no computer_id; every env lookup is the stand-in
+            srv = mcp.Server(client=None, default_computer_id="s1", env_factory=lambda cid: fake)
             msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
                     {"jsonrpc": "2.0", "method": "notifications/initialized"},
                     {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
