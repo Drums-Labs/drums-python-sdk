@@ -422,6 +422,12 @@ class Reward:
         self.checker_skipped = d.get("checker_skipped")     # e.g. "quarantined: client": the checker did not run
         self.gates = d.get("gates")
         self.seconds = d.get("seconds")
+        # the reward audit (drumsd >= sota/t6): recheck, redundant checker, scope (reward-hacking signal), checker
+        # timeout/crash. `trusted` is True only for a valid episode with a score and no audit flag; an older drumsd
+        # sends no audit, so `trusted` is None (unknown), never True.
+        self.audit = d.get("audit") or {}
+        self.audit_flags = list(self.audit.get("flags") or [])
+        self.trusted = self.audit.get("trusted") if self.audit else None
         # why the episode is not valid, in words (empty when valid). drumsd >= 0.4.2 sends them; for an older one
         # they are derived, and a quarantined env's "valid" verdict (the old inconsistency) is reported as invalid.
         self.invalid_reasons = list(d.get("invalid_reasons") or [])
@@ -598,6 +604,24 @@ class Env:
         if ttl is not None:
             body["ttl_s"] = ttl
         return State(self.client.call("POST", f"/v1/slots/{self.id}/capture", body)["id"])
+
+    def prefork(self, n: int, quiesce_timeout: float | None = None, *, keep_state: bool = True,
+                idle_timeout: float | None = None, ttl: float | None = None, state_idle_timeout: float | None = None,
+                state_ttl: float | None = None) -> dict:
+        """Prepare fork(n) now, in the background (API: prefork), and return at once. Call it right after an action;
+        the next fork(n) with the same keep_state then gets these children if the env took no input since, no
+        process started or exited in it, and its desktop state hash is unchanged (else it is discarded and the fork
+        runs as usual). Any input (step, reset) discards it; so does a prefork nobody claims within the daemon's
+        prefork_max_age_s (default 120 s). The children are the env as it was when it went quiet after the action."""
+        body = {"n": n}
+        if quiesce_timeout is not None:
+            body["quiesce_timeout_s"] = quiesce_timeout
+        if not keep_state:
+            body["delete_state_with_children"] = True
+        for k, v in (("idle_timeout_s", idle_timeout), ("ttl_s", ttl), ("state_idle_timeout_s", state_idle_timeout), ("state_ttl_s", state_ttl)):
+            if v is not None:
+                body[k] = v
+        return self.client.call("POST", f"/v1/slots/{self.id}/prefork", body)
 
     def fork(self, n: int, strict: bool = True, quiesce_timeout: float | None = None, *, keep_state: bool = True,
              idle_timeout: float | None = None, ttl: float | None = None, state_idle_timeout: float | None = None,
