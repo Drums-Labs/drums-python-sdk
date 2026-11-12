@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures as cf
+import ipaddress
 import json
 import os
 import struct
@@ -44,7 +45,7 @@ import threading
 import warnings
 
 from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerError, CheckpointStale, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
-                     EnvGone, ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RestoreFailed, TaskSetupFailed,
+                     EnvGone, ForkError, GateFailed, GuestError, InsecureTransport, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RestoreFailed, TaskSetupFailed,
                      TaskUnsupported)
 
 __version__ = "0.3.0"
@@ -54,22 +55,59 @@ DEFAULT_IMAGE = "osworld-ubuntu"
 __all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "ForkResult", "env", "__version__",
            "DrumsError", "AuthError", "BadRequest", "NotFound", "EnvGone", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
            "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded",
-           "CheckpointStale", "TaskUnsupported"]
+           "CheckpointStale", "TaskUnsupported", "InsecureTransport", "check_transport"]
 
 _STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 410: EnvGone, 422: BadRequest, 429: Overloaded, 502: GuestError,
            503: DaemonUnavailable}
 
 
+def _is_loopback(host: str | None) -> bool:
+    """localhost, 127.0.0.0/8 or ::1 (the only hosts a token may reach over plain HTTP by default)."""
+    if not host:
+        return False
+    h = host.lower().rstrip(".")
+    if h == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def check_transport(url: str, token: str | None, allow_insecure_http: bool | None = None) -> None:
+    """Refuse (InsecureTransport) to pair `token` with a plain-HTTP `url` whose host is not loopback. No token, an
+    https URL, localhost / 127.0.0.0/8 / ::1, or the opt-in (`allow_insecure_http=True`, else
+    $DRUMS_ALLOW_INSECURE_HTTP=1) pass. Runs before any request; the error names the host, never the token."""
+    if not token:
+        return
+    if allow_insecure_http is None:
+        allow_insecure_http = os.environ.get("DRUMS_ALLOW_INSECURE_HTTP", "").strip().lower() in ("1", "true", "yes")
+    if allow_insecure_http:
+        return
+    u = urllib.parse.urlsplit(url)
+    if u.scheme.lower() == "https":
+        return
+    try:
+        host = u.hostname
+    except ValueError:
+        host = None
+    if _is_loopback(host):
+        return
+    raise InsecureTransport(host or "<no host>", u.scheme.lower())
+
+
 def connect(url: str | None = None, token: str | None = None, *, timeout: float = 900.0, retry_s: float = 60.0, check: bool = True,
-            close_on_exit: bool = True, handle_signals: bool = True) -> "Client":
+            close_on_exit: bool = True, handle_signals: bool = True, allow_insecure_http: bool | None = None) -> "Client":
     """A client for one drumsd. `url`/`token` default to $DRUMS_URL / $DRUMS_TOKEN. With check=True the token is tried
     at once (AuthError / DaemonUnavailable here rather than on the first create).
+    A token is only sent over https, or over plain http to localhost / 127.0.0.0/8 / ::1; any other http URL raises
+    InsecureTransport before a request unless allow_insecure_http=True (or $DRUMS_ALLOW_INSECURE_HTTP=1).
     close_on_exit=True: the envs this client created and did not close are closed when the process exits (atexit) or
     when the client is used as a context manager and the block ends. handle_signals=True: SIGTERM and SIGHUP exit
     through that cleanup too, when their handler is still the default one (never replaces a handler you installed;
     main thread only). A `kill -9` cannot be caught: the server-side leases reap those envs."""
     c = Client(url or DEFAULT_URL, token if token is not None else os.environ.get("DRUMS_TOKEN"), timeout=timeout, retry_s=retry_s,
-               close_on_exit=close_on_exit, handle_signals=handle_signals)
+               close_on_exit=close_on_exit, handle_signals=handle_signals, allow_insecure_http=allow_insecure_http)
     if check:
         c.health()
     return c
@@ -96,9 +134,10 @@ class Client:
     """A connection to one drumsd (use drums.connect). Creates envs, lists them, and reads health and metrics."""
 
     def __init__(self, url: str = DEFAULT_URL, token: str | None = None, timeout: float = 900.0, retry_s: float = 60.0,
-                 close_on_exit: bool = False, handle_signals: bool = False):
+                 close_on_exit: bool = False, handle_signals: bool = False, allow_insecure_http: bool | None = None):
         self.url, self.timeout, self.retry_s = url.rstrip("/"), timeout, retry_s
         self.token = token if token is not None else os.environ.get("DRUMS_TOKEN")
+        check_transport(self.url, self.token, allow_insecure_http)   # InsecureTransport: a token over plain http off-loopback
         self._owned: dict[str, None] = {}          # ids of envs this client created and has not closed (insertion order)
         self._owned_lock = threading.Lock()
         self.close_on_exit = close_on_exit

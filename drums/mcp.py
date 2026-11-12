@@ -15,8 +15,10 @@ Framing: one JSON-RPC message per line on stdin, one reply per line on stdout (w
 array on a line is a batch. Notifications get no reply, unknown methods -32601, unreadable lines -32700. A tool
 failure is a tool result with isError true (never a JSON-RPC error). Screenshots are image content (PNG), everything
 else one text item holding JSON. Destructive tools (destroy_computer, delete_snapshot, revoke_api_key) are refused
-before any request unless `confirm` is true. Token: $DRUMS_TOKEN, else the file $DRUMS_TOKEN_FILE, else
-/etc/drums/token. Standard library only.
+before any request unless `confirm` is true (the caller supplies it; the MCP client owns the user's approval).
+Token: $DRUMS_TOKEN, else the file $DRUMS_TOKEN_FILE, else /etc/drums/token. The token only travels over https, or
+over plain http to localhost / 127.0.0.0/8 / ::1; any other http URL is refused unless --allow-insecure-http (or
+$DRUMS_ALLOW_INSECURE_HTTP=1) is given. Standard library only.
 """
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ import sys
 import urllib.parse
 
 from . import Client, Env, __version__, connect
-from .errors import DrumsError, NotFound
+from .errors import DrumsError, InsecureTransport, NotFound
 from .hybrid import HybridTools
 
 PROTOCOL = "2025-06-18"
@@ -443,6 +445,8 @@ def read_token() -> str | None:
 def add_arguments(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
     ap.add_argument("--env", metavar="ID", help="default computer_id for the desktop tools")
     ap.add_argument("--url", metavar="URL", help="the gateway or drumsd URL (default $DRUMS_URL)")
+    ap.add_argument("--allow-insecure-http", action="store_true",
+                    help="send the token over plain http to a host that is not loopback (default: refused; also $DRUMS_ALLOW_INSECURE_HTTP=1)")
     ap.add_argument("--create", action="store_true", help="create one computer, bind it, and close it when the server exits")
     ap.add_argument("--task", metavar="FILE", help="with --create: a task document (JSON file) to load")
     ap.add_argument("--print-config", choices=["claude", "claude-local", "cursor", "codex"], metavar="CLIENT",
@@ -460,7 +464,12 @@ def run(a) -> int:
         sys.stderr.write("drums mcp: --env and --create exclude each other\n")
         return 2
     # retry_s: an unreachable server fails a tool call within seconds (a trainer's 60 s is too long for a chat turn)
-    c = connect(a.url or os.environ.get("DRUMS_URL"), read_token(), check=False, close_on_exit=bool(a.create), retry_s=5.0)
+    try:
+        c = connect(a.url or os.environ.get("DRUMS_URL"), read_token(), check=False, close_on_exit=bool(a.create), retry_s=5.0,
+                    allow_insecure_http=True if a.allow_insecure_http else None)
+    except InsecureTransport as e:
+        sys.stderr.write(f"drums mcp: {e}\n")       # names the host and the opt-ins, never the token
+        return 2
     env, bound = None, a.env
     if a.create:
         task = None
