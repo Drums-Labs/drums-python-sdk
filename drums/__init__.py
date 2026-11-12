@@ -422,7 +422,7 @@ class Reward:
         self.checker_skipped = d.get("checker_skipped")     # e.g. "quarantined: client": the checker did not run
         self.gates = d.get("gates")
         self.seconds = d.get("seconds")
-        # the reward audit (drumsd >= sota/t6): recheck, redundant checker, scope (reward-hacking signal), checker
+        # the reward audit (drumsd 0.4.2 and later): recheck, redundant checker, scope (reward-hacking signal), checker
         # timeout/crash. `trusted` is True only for a valid episode with a score and no audit flag; an older drumsd
         # sends no audit, so `trusted` is None (unknown), never True.
         self.audit = d.get("audit") or {}
@@ -499,7 +499,7 @@ class Env:
         """pyautogui code (str) or an action dict: {"type": "pyautogui", "code"}, {"type": "execute", "command", "shell"},
         {"type": "launch", "command", "shell"}, {"type": "sleep", "seconds"}. Screen 1920x1080, origin top left, pixels.
         pyautogui and execute run inside the env as its desktop user `user` (not root), with OSWorld's prefix
-        (`import pyautogui, time`). See docs/actions-and-observations.md.
+        (`import pyautogui, time`). See https://console.drums.run/docs/concepts/computers-and-templates#actions.
         check=True (default): an action that ran and exited non-zero raises ActionFailed with its exit status, output
         and error; check=False returns the result as is. A guest that does not answer or times out (120 s) raises
         GuestError either way."""
@@ -707,7 +707,7 @@ class Env:
 
 
 class GuestClient:
-    """The GuestClient protocol of drums-lab rlbackends (execute/launch/screenshot/screen_size/platform), through drumsd."""
+    """The GuestClient protocol (execute/launch/screenshot/screen_size/platform) that RL backends use, through drumsd."""
 
     def __init__(self, env: Env):
         self.env, self.base, self.timeout = env, f"{env.client.url}/v1/slots/{env.id}", env.client.timeout
