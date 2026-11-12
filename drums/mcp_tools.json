@@ -1,0 +1,481 @@
+{
+  "$comment": "Canonical Drums MCP tool list. Both servers (gateway /gw/mcp in TypeScript, `drums mcp` stdio in Python) load this file verbatim and must list exactly these tools with exactly these inputSchemas. `scope` is the API-key scope the gateway requires; `destructive` tools require `confirm: true`; `layer` is workspace or desktop. Desktop tools take `computer_id` (the Python server fills it from --env when bound).",
+  "version": "0.3",
+  "tools": [
+    {
+      "name": "list_templates",
+      "layer": "workspace",
+      "scope": "computers:read",
+      "description": "List the templates (base desktop images) this workspace can start a computer from. Use a template's `checkpoint` as the `template` argument of create_computer.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "list_computers",
+      "layer": "workspace",
+      "scope": "computers:read",
+      "description": "List the live computers (desktops) of this workspace: id, name, state, validity, task, created_at. Pass include_destroyed to also see closed ones.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "include_destroyed": { "type": "boolean", "description": "Also list destroyed computers (default false).", "default": false },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_computer",
+      "layer": "workspace",
+      "scope": "computers:write",
+      "description": "Start a new isolated desktop (computer) from a template or a snapshot, optionally with a task loaded. Returns the computer record; its `id` is the computer_id every desktop tool takes. The desktop is ready when state is `ready` and validity is `valid`.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "template": { "type": "string", "description": "A template checkpoint from list_templates (for example osworld-ubuntu) or a snapshot id from list_snapshots.", "minLength": 1, "maxLength": 200 },
+          "task_id": { "type": "string", "description": "A task id from list_tasks to load into the desktop at start (its setup runs before the episode).", "maxLength": 200 },
+          "task": { "type": "object", "description": "A full task document (OSWorld format) instead of task_id.", "additionalProperties": true },
+          "ttl_s": { "type": "integer", "description": "Lifetime in seconds; the computer is closed when it expires (0 or absent: the workspace default).", "minimum": 0, "maximum": 2592000 },
+          "setup": { "type": "boolean", "description": "Run the task's setup (default true when a task is given)." }
+        },
+        "required": ["template"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_computer",
+      "layer": "workspace",
+      "scope": "computers:read",
+      "description": "Read one computer's record: state, validity verdict and reasons, task, lease, epoch.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "computer_id": { "type": "string", "description": "The computer id.", "minLength": 1, "maxLength": 64 } },
+        "required": ["computer_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "destroy_computer",
+      "layer": "workspace",
+      "scope": "computers:write",
+      "destructive": true,
+      "description": "Close a computer for good (its desktop state is lost). Destructive: the call is refused unless confirm is true.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "confirm": { "type": "boolean", "description": "Must be true. Say so to the user before destroying.", "const": true }
+        },
+        "required": ["computer_id", "confirm"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_snapshots",
+      "layer": "workspace",
+      "scope": "computers:read",
+      "description": "List the saved desktop states (snapshots) of this workspace. A snapshot id can be the `template` of create_computer.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "create_snapshot",
+      "layer": "workspace",
+      "scope": "computers:write",
+      "description": "Save a computer's current desktop state as a snapshot (the computer keeps running). Returns the snapshot record.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "name": { "type": "string", "description": "A name for the snapshot (optional).", "maxLength": 80 }
+        },
+        "required": ["computer_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "delete_snapshot",
+      "layer": "workspace",
+      "scope": "computers:write",
+      "destructive": true,
+      "description": "Delete a snapshot. Destructive: refused unless confirm is true.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "snapshot_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "confirm": { "type": "boolean", "const": true }
+        },
+        "required": ["snapshot_id", "confirm"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_tasks",
+      "layer": "workspace",
+      "scope": "computers:read",
+      "description": "List the verified computer-use tasks available on this host (id, domain, instruction). Load one with create_computer(task_id) or load_task.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "domain": { "type": "string", "description": "Filter by domain (for example chrome, os, libreoffice_calc).", "maxLength": 80 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 200 }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_task",
+      "layer": "workspace",
+      "scope": "computers:read",
+      "description": "Read one task document (instruction, setup, checker).",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "task_id": { "type": "string", "minLength": 1, "maxLength": 200 } },
+        "required": ["task_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "load_task",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "Load a task into a running computer (runs its setup and starts a new episode). After this, `verify` scores the desktop against this task's checker.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "task_id": { "type": "string", "maxLength": 200 },
+          "task": { "type": "object", "additionalProperties": true }
+        },
+        "required": ["computer_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_runs",
+      "layer": "workspace",
+      "scope": "runs:read",
+      "description": "List the runs (training, scripted tests) of this workspace, newest first: id, name, kind, status, counts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "description": "Filter by status (queued, running, completed, failed, cancelled).", "maxLength": 40 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_run",
+      "layer": "workspace",
+      "scope": "runs:write",
+      "description": "Submit a run (RunSpec: name, kind, task_set_id, task_ids, template_version_id, agent, execution, budget). It is queued and the host's runner picks it up. Returns run_id and operation_id.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "spec": { "type": "object", "description": "The RunSpec, the same document the console's New run form submits.", "additionalProperties": true },
+          "idempotency_key": { "type": "string", "description": "Resubmitting with the same key returns the same run.", "maxLength": 128 }
+        },
+        "required": ["spec"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_run",
+      "layer": "workspace",
+      "scope": "runs:read",
+      "description": "Read a run's status and results: status, stop reason, attempt counts (done, succeeded, verified valid), metrics and the last events.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "run_id": { "type": "string", "minLength": 1, "maxLength": 64 } },
+        "required": ["run_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_evaluations",
+      "layer": "workspace",
+      "scope": "runs:read",
+      "description": "List evaluation runs of this workspace, newest first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "maxLength": 40 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "create_evaluation",
+      "layer": "workspace",
+      "scope": "runs:write",
+      "description": "Submit an evaluation (a run with kind evaluation): the same RunSpec as create_run; `kind` is set to evaluation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "spec": { "type": "object", "additionalProperties": true },
+          "idempotency_key": { "type": "string", "maxLength": 128 }
+        },
+        "required": ["spec"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_evaluation",
+      "layer": "workspace",
+      "scope": "runs:read",
+      "description": "Read an evaluation's status and results (per-task success and verified validity).",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "run_id": { "type": "string", "minLength": 1, "maxLength": 64 } },
+        "required": ["run_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_api_keys",
+      "layer": "workspace",
+      "scope": null,
+      "description": "List this workspace's API keys (metadata only: id, name, prefix, scopes, created, last used, expiry; never a secret).",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "create_api_key",
+      "layer": "workspace",
+      "scope": null,
+      "description": "Create an API key in this workspace. The plaintext key is in this reply once and nowhere else. Scopes cannot exceed the calling key's own scopes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "scopes": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["computers:read", "computers:write", "runs:read", "runs:write", "templates:read", "templates:write", "usage:read", "audit:read"] },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "expires_in_days": { "type": "integer", "minimum": 1, "maximum": 365 }
+        },
+        "required": ["name", "scopes"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "revoke_api_key",
+      "layer": "workspace",
+      "scope": null,
+      "destructive": true,
+      "description": "Revoke an API key; it is refused on its next call. Destructive: refused unless confirm is true.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "key_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "confirm": { "type": "boolean", "const": true }
+        },
+        "required": ["key_id", "confirm"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_audit_log",
+      "layer": "workspace",
+      "scope": "audit:read",
+      "description": "Read this workspace's audit log, newest first: who did what, when, with what outcome. MCP calls appear with actor mcp and action mcp.<tool>.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "description": "Filter by action prefix, for example mcp or computer.create.", "pattern": "^[a-z_]+(\\.[a-z_.]+)?$", "maxLength": 80 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+          "cursor": { "type": "string", "description": "next_cursor from the previous page.", "maxLength": 200 }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "gui",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "Run a GUI action in the desktop: Python using pyautogui (e.g. pyautogui.click(100, 200), pyautogui.write('text'), pyautogui.hotkey('ctrl', 's')). Screen is 1920x1080 pixels. Take a screenshot afterwards to see the result.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "code": { "type": "string", "minLength": 1, "maxLength": 16384 }
+        },
+        "required": ["computer_id", "code"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "screenshot",
+      "layer": "desktop",
+      "scope": "computers:read",
+      "description": "Take a screenshot of the desktop (PNG image).",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 } },
+        "required": ["computer_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "shell",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "Run a bash command in the desktop as the desktop user (no root, no internet). Returns returncode, stdout, stderr.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "command": { "type": "string", "minLength": 1, "maxLength": 20000 },
+          "timeout_s": { "type": "number", "minimum": 1, "maximum": 120, "default": 60 }
+        },
+        "required": ["computer_id", "command"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_file",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "Read a file in the desktop (~ is /home/user). Text comes back as text, binary as base64.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "path": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "required": ["computer_id", "path"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "write_file",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "Write a text file in the desktop (creates folders; overwrites).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "content": { "type": "string", "maxLength": 2000000 }
+        },
+        "required": ["computer_id", "path", "content"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_dir",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "List a folder in the desktop: name, dir, size.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "path": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "required": ["computer_id", "path"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "office_convert",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "Convert a document with LibreOffice (e.g. docx->pdf, xlsx->csv, csv->xlsx). Writes next to the source unless outdir is given.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "format": { "type": "string", "minLength": 1, "maxLength": 40 },
+          "outdir": { "type": "string", "maxLength": 4096 }
+        },
+        "required": ["computer_id", "path", "format"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "spreadsheet_read",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "Read the first sheet of a spreadsheet (xlsx, ods, csv) as rows of text, through LibreOffice.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "path": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "required": ["computer_id", "path"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "browser_tabs",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "List the open Chrome tabs (url, title). Needs Chrome started with --remote-debugging-port=1337.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 } },
+        "required": ["computer_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "browser_open",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "Open a URL in a new Chrome tab (Chrome must be running with --remote-debugging-port=1337).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "url": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "required": ["computer_id", "url"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "verify",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "Score the desktop's current state with the loaded task's checker: score (0..1), valid (every gate of the episode passed), trusted, audit flags.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 } },
+        "required": ["computer_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "fork",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "Fork a running desktop into n children that each continue from this exact state (apps open, files as they are). Returns the children's computer ids. The parent keeps running.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "n": { "type": "integer", "minimum": 1, "maximum": 64, "default": 1 }
+        },
+        "required": ["computer_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "reset",
+      "layer": "desktop",
+      "scope": "computers:write",
+      "description": "Reset a desktop to its clean template state and start a new episode (the loaded task's setup runs again).",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 } },
+        "required": ["computer_id"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
