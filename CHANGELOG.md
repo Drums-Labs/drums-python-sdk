@@ -20,6 +20,12 @@ this release adds the local server and the client methods for the new gateway ro
   the host and the opt-ins, never the token. Opt in with `drums mcp --allow-insecure-http`,
   `DRUMS_ALLOW_INSECURE_HTTP=1`, or `connect(..., allow_insecure_http=True)` / `Client(..., allow_insecure_http=True)`.
   `drums.check_transport(url, token, allow_insecure_http=None)` is the check itself.
+- Redirect rule: the `Client` follows a redirect only to the same origin (scheme, host, port) as the request, at
+  most `drums.MAX_REDIRECTS` (5) hops, and runs the transport check on every hop. A redirect to another origin
+  (another host or port, https to http) or a sixth hop raises the new `drums.RedirectRefused` before it is
+  followed, so the token is never re-sent elsewhere by way of a `Location` header (urllib's default follows and
+  re-sends `Authorization`). The message names the target's scheme, host and port only. `308` is followed like
+  `307` on every supported Python.
 - `drums` console script (`drums mcp`, `drums version`); `mcp_tools.json` ships in the wheel.
 - `Client.runs`, `create_run`, `run`, `api_keys`, `create_api_key`, `revoke_api_key`, `audit` for the gateway's
   `/v1/runs`, `/v1/api-keys` and `/v1/audit` routes; `call()` takes extra headers.

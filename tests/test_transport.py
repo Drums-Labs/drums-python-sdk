@@ -5,8 +5,12 @@ import contextlib
 import io
 import json
 import os
+import socket
 import sys
+import threading
 import unittest
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import drums  # noqa: E402
@@ -174,6 +178,176 @@ class CliTransport(unittest.TestCase):
                     self.assertIn("drums_sk_...", out, (var, url, client))
                     self.assertIn(url, out, (var, url, client))
                     self.assertEqual(err, "", (var, url, client))   # printing a snippet sends nothing: no transport refusal
+
+
+class Redirecting(BaseHTTPRequestHandler):
+    """A loopback server that redirects: every request is recorded as (path, headers). Location targets are built
+    from the query-free path; `remote_port` is a second loopback listener that must never see a connection."""
+    requests = []
+    remote_port = 0
+
+    def log_message(self, *a):
+        pass
+
+    def _redirect(self, code, location):
+        self.send_response(code)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _json(self, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        Redirecting.requests.append((self.path, dict(self.headers)))
+        host = f"127.0.0.1:{self.server.server_address[1]}"
+        p = self.path
+        if p == "/to-remote-host":
+            self._redirect(302, "http://example.com/v1/health")
+        elif p == "/to-remote-https":
+            self._redirect(301, "https://example.com/v1/health")
+        elif p == "/to-other-loopback-port":
+            self._redirect(307, f"http://127.0.0.1:{Redirecting.remote_port}/v1/health")
+        elif p == "/to-remote-with-secrets":
+            self._redirect(302, "http://user:hunter2@example.com/v1/health?token=" + SECRET)
+        elif p == "/same-relative":
+            self._redirect(302, "/landed")
+        elif p == "/same-absolute":
+            self._redirect(308, f"http://{host}/landed")
+        elif p == "/same-twice":
+            self._redirect(302, "/same-relative")
+        elif p == "/loop":
+            self._redirect(302, "/loop")
+        elif p.startswith("/chain/"):
+            self._redirect(302, f"/chain/{int(p.rsplit('/', 1)[1]) + 1}")
+        elif p == "/landed":
+            self._json({"landed": True, "authorization": self.headers.get("Authorization")})
+        else:
+            self._json({"path": p})
+
+    do_POST = do_GET
+
+
+class Redirects(unittest.TestCase):
+    """Redirect policy: same origin (scheme, host, port) only, at most drums.MAX_REDIRECTS hops, the token never sent
+    elsewhere. The origin here is a plain-http loopback server (allowed without opt-in); an https origin cannot be
+    served by a stdlib test fixture, so the https->http case calls the handler's redirect_request directly with an
+    https request URL, which is exactly what urllib calls for a 30x and the only input the policy looks at."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Redirecting)
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+        cls.remote = socket.socket()
+        cls.remote.bind(("127.0.0.1", 0))
+        cls.remote.listen(4)
+        cls.remote.settimeout(0.2)
+        Redirecting.remote_port = cls.remote.getsockname()[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.remote.close()
+
+    def setUp(self):
+        Redirecting.requests = []
+        with environment({}):
+            self.client = drums.Client(self.url, SECRET, retry_s=0.0)
+
+    def remote_saw_a_connection(self):
+        try:
+            c, _ = self.remote.accept()
+        except socket.timeout:
+            return False
+        c.close()
+        return True
+
+    def assert_refused(self, path, *expect_in_message):
+        Redirecting.requests = []
+        with self.assertRaises(drums.RedirectRefused) as cm:
+            self.client.call("GET", path)
+        msg = str(cm.exception)
+        self.assertNotIn(SECRET, msg)
+        self.assertNotIn("Q" * 8, msg)
+        self.assertNotIn("hunter2", msg)
+        self.assertNotIn("?", msg)
+        self.assertNotIn("/v1/", msg)
+        for e in expect_in_message:
+            self.assertIn(e, msg)
+        self.assertIsInstance(cm.exception, drums.DrumsError)
+        self.assertEqual(len(Redirecting.requests), 1, "only the first request was made")
+        return cm.exception
+
+    def test_cross_host_redirect_is_refused_unfollowed(self):
+        self.assert_refused("/to-remote-host", "HTTP 302", "http://example.com:80", "127.0.0.1")
+        self.assert_refused("/to-remote-https", "HTTP 301", "https://example.com:443")
+
+    def test_loopback_to_remote_port_is_refused_and_nothing_reaches_it(self):
+        self.assert_refused("/to-other-loopback-port", "HTTP 307", f"http://127.0.0.1:{Redirecting.remote_port}")
+        self.assertFalse(self.remote_saw_a_connection())
+
+    def test_refusal_text_has_no_token_userinfo_or_query(self):
+        e = self.assert_refused("/to-remote-with-secrets", "http://example.com:80")
+        self.assertNotIn("user", str(e))
+        self.assertNotIn("token=", str(e))
+        self.assertEqual(e.target, "http://example.com:80")
+
+    def test_same_origin_redirect_is_followed_with_the_token(self):
+        for path, hops in (("/same-relative", 1), ("/same-absolute", 1), ("/same-twice", 2)):
+            Redirecting.requests = []
+            out = self.client.call("GET", path)
+            self.assertEqual(out["landed"], True, path)
+            self.assertEqual(out["authorization"], f"Bearer {SECRET}", path)
+            self.assertEqual([p for p, _ in Redirecting.requests][-1], "/landed", path)
+            self.assertEqual(len(Redirecting.requests), hops + 1, path)
+            for _, h in Redirecting.requests:
+                self.assertEqual(h.get("Authorization"), f"Bearer {SECRET}", path)
+
+    def test_redirect_loop_and_long_chain_are_capped(self):
+        for path in ("/loop", "/chain/0"):
+            Redirecting.requests = []
+            with self.assertRaises(drums.RedirectRefused) as cm:
+                self.client.call("GET", path)
+            self.assertIn(f"more than {drums.MAX_REDIRECTS} redirects", str(cm.exception))
+            self.assertNotIn(SECRET, str(cm.exception))
+            self.assertEqual(len(Redirecting.requests), drums.MAX_REDIRECTS + 1, path)   # the first request + 5 hops
+        self.assertEqual(drums.MAX_REDIRECTS, 5)
+
+    def test_https_origin_to_plain_http_is_refused_by_the_handler(self):
+        """The policy, called as urllib's http_error_30x calls it, with an https request URL."""
+        handler = drums._RedirectPolicy(SECRET, allow_insecure_http=False)
+        req = urllib.request.Request("https://gw.example/gw/v1/health", headers={"Authorization": f"Bearer {SECRET}"})
+        fp = io.BytesIO(b"")
+        for target in ("http://gw.example/gw/v1/health", "http://gw.example:443/gw/v1/health", "https://gw.example:8443/gw/v1/health",
+                       "https://other.example/gw/v1/health", "http://127.0.0.1:7070/v1/health"):
+            with self.assertRaises(drums.RedirectRefused) as cm:
+                handler.redirect_request(req, fp, 302, "Found", {}, target)
+            self.assertNotIn(SECRET, str(cm.exception), target)
+            self.assertIn("https://gw.example:443", str(cm.exception), target)
+        # the same origin, spelled with or without the default port, is followed with the token
+        for target in ("https://gw.example/gw/v1/other", "https://gw.example:443/gw/v1/other", "https://GW.example/gw/v1/other"):
+            new = handler.redirect_request(req, io.BytesIO(b""), 302, "Found", {}, target)
+            self.assertEqual(new.get_header("Authorization"), f"Bearer {SECRET}", target)
+            self.assertEqual(new.full_url, target)
+        # a sixth hop is refused even to the same origin
+        req.redirect_dict = {"https://gw.example/gw/a": 5}
+        with self.assertRaises(drums.RedirectRefused):
+            handler.redirect_request(req, io.BytesIO(b""), 302, "Found", {}, "https://gw.example/gw/v1/other")
+
+    def test_opted_in_http_origin_follows_same_origin_only(self):
+        # a client opted into plain http off loopback still never follows a redirect to another origin
+        handler = drums._RedirectPolicy(SECRET, allow_insecure_http=True)
+        req = urllib.request.Request("http://gw.internal:7070/v1/health", headers={"Authorization": f"Bearer {SECRET}"})
+        new = handler.redirect_request(req, io.BytesIO(b""), 302, "Found", {}, "http://gw.internal:7070/v1/other")
+        self.assertEqual(new.get_header("Authorization"), f"Bearer {SECRET}")
+        with self.assertRaises(drums.RedirectRefused):
+            handler.redirect_request(req, io.BytesIO(b""), 302, "Found", {}, "http://gw2.internal:7070/v1/other")
 
 
 if __name__ == "__main__":

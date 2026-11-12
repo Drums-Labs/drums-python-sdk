@@ -45,7 +45,7 @@ import threading
 import warnings
 
 from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerError, CheckpointStale, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
-                     EnvGone, ForkError, GateFailed, GuestError, InsecureTransport, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RestoreFailed, TaskSetupFailed,
+                     EnvGone, ForkError, GateFailed, GuestError, InsecureTransport, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RedirectRefused, RestoreFailed, TaskSetupFailed,
                      TaskUnsupported)
 
 __version__ = "0.3.0"
@@ -55,7 +55,7 @@ DEFAULT_IMAGE = "osworld-ubuntu"
 __all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "ForkResult", "env", "__version__",
            "DrumsError", "AuthError", "BadRequest", "NotFound", "EnvGone", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
            "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded",
-           "CheckpointStale", "TaskUnsupported", "InsecureTransport", "check_transport"]
+           "CheckpointStale", "TaskUnsupported", "InsecureTransport", "RedirectRefused", "check_transport"]
 
 _STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 410: EnvGone, 422: BadRequest, 429: Overloaded, 502: GuestError,
            503: DaemonUnavailable}
@@ -94,6 +94,56 @@ def check_transport(url: str, token: str | None, allow_insecure_http: bool | Non
     if _is_loopback(host):
         return
     raise InsecureTransport(host or "<no host>", u.scheme.lower())
+
+
+MAX_REDIRECTS = 5
+
+
+def _origin(url: str) -> tuple:
+    """(scheme, host, port) of a URL, the port explicit (80 / 443 when the URL leaves it out)."""
+    u = urllib.parse.urlsplit(url)
+    scheme = u.scheme.lower()
+    try:
+        host, port = (u.hostname or "").lower(), u.port
+    except ValueError:
+        host, port = "", None
+    if port is None:
+        port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    return scheme, host, port
+
+
+def _origin_text(url: str) -> str:
+    """scheme://host:port of a URL, for messages: no userinfo, path or query."""
+    scheme, host, port = _origin(url)
+    return f"{scheme or '?'}://{host or '<no host>'}{'' if port is None else f':{port}'}"
+
+
+class _RedirectPolicy(urllib.request.HTTPRedirectHandler):
+    """urllib follows redirects and re-sends every header, Authorization included. This handler follows a redirect only
+    to the SAME origin (scheme, host, port) as the request it answers, at most MAX_REDIRECTS hops per call, and runs
+    check_transport on the target first; any other hop raises RedirectRefused before a request is made, so the token
+    never reaches another origin or plain http off loopback by way of a Location header."""
+    max_redirections = MAX_REDIRECTS + 1    # the stdlib caps never fire first: hops are counted and refused below
+    max_repeats = MAX_REDIRECTS + 1
+    http_error_308 = urllib.request.HTTPRedirectHandler.http_error_302   # Python < 3.11 has no 308 handler
+
+    def __init__(self, token: str | None, allow_insecure_http: bool):
+        self.token, self.allow_insecure_http = token, allow_insecure_http
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        hops = sum((getattr(req, "redirect_dict", None) or {}).values())
+        if hops >= MAX_REDIRECTS:
+            fp.close()
+            raise RedirectRefused(f"refusing to follow more than {MAX_REDIRECTS} redirects from {_origin_text(req.full_url)} "
+                                  f"(HTTP {code}, next hop {_origin_text(newurl)})", _origin_text(newurl))
+        if _origin(newurl) != _origin(req.full_url):
+            fp.close()
+            raise RedirectRefused(f"refusing to follow the HTTP {code} redirect from {_origin_text(req.full_url)} to "
+                                  f"{_origin_text(newurl)}: the Drums token is only sent to the origin it was given",
+                                  _origin_text(newurl))
+        check_transport(newurl, self.token, self.allow_insecure_http)       # same origin, so this is defence in depth
+        # 308 keeps the method like 307; the stdlib's redirect_request learnt 308 in 3.11, so hand it 307 on older Pythons
+        return super().redirect_request(req, fp, 307 if code == 308 else code, msg, headers, newurl)
 
 
 def connect(url: str | None = None, token: str | None = None, *, timeout: float = 900.0, retry_s: float = 60.0, check: bool = True,
@@ -138,6 +188,11 @@ class Client:
         self.url, self.timeout, self.retry_s = url.rstrip("/"), timeout, retry_s
         self.token = token if token is not None else os.environ.get("DRUMS_TOKEN")
         check_transport(self.url, self.token, allow_insecure_http)   # InsecureTransport: a token over plain http off-loopback
+        if allow_insecure_http is None:
+            allow_insecure_http = os.environ.get("DRUMS_ALLOW_INSECURE_HTTP", "").strip().lower() in ("1", "true", "yes")
+        self.allow_insecure_http = bool(allow_insecure_http)
+        # redirects: same origin only, MAX_REDIRECTS hops, check_transport on every hop (RedirectRefused otherwise)
+        self._opener = urllib.request.build_opener(_RedirectPolicy(self.token, self.allow_insecure_http))
         self._owned: dict[str, None] = {}          # ids of envs this client created and has not closed (insertion order)
         self._owned_lock = threading.Lock()
         self.close_on_exit = close_on_exit
@@ -210,7 +265,8 @@ class Client:
     def call(self, method: str, path: str, body=None, raw: bool = False, timeout: float | None = None, headers: dict | None = None):
         """One request. GETs are retried while drumsd is unreachable (up to retry_s: a restarting drumsd comes back and
         reconciles); other methods are never retried, since their outcome is unknown after a dropped connection.
-        `headers` are added to the request (e.g. Idempotency-Key)."""
+        `headers` are added to the request (e.g. Idempotency-Key). A redirect is followed only to the same origin
+        (scheme, host, port), at most MAX_REDIRECTS hops; any other redirect raises RedirectRefused unfollowed."""
         data = None if body is None else json.dumps(body).encode()
         headers = {"Content-Type": "application/json", **(headers or {})}
         if self.token:
@@ -220,7 +276,7 @@ class Client:
         while True:
             req = urllib.request.Request(self.url + path, data=data, method=method, headers=headers)
             try:
-                with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
+                with self._opener.open(req, timeout=timeout or self.timeout) as r:
                     b = r.read()
                     return b if raw else json.loads(b or b"null")
             except urllib.error.HTTPError as e:

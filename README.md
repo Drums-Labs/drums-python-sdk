@@ -199,6 +199,9 @@ The canonical list with every input schema is `drums/mcp_tools.json`; `tools/lis
   HTTP anyway, opt in: `drums mcp --allow-insecure-http`, `DRUMS_ALLOW_INSECURE_HTTP=1`, or
   `drums.connect(url, token, allow_insecure_http=True)` / `drums.Client(..., allow_insecure_http=True)` in the SDK
   (the `Client` applies the same rule, so SDK scripts are covered too; the error is `drums.InsecureTransport`).
+- Redirects are followed only to the same origin (scheme, host, port), at most 5 hops, with the same transport
+  check on each hop; any other redirect raises `drums.RedirectRefused` before it is followed, so the token is
+  never re-sent to another host or over plain HTTP because a server said `Location`.
 - Arguments are checked against the tool's schema before anything is sent; a violation is a tool error naming the
   field. A tool failure is always a tool result with `isError`, never a protocol error.
 - `--print-config` prints placeholders (`<GATEWAY_URL>` when no URL is known, always `drums_sk_...`), never a key.
