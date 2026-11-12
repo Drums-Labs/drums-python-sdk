@@ -31,6 +31,10 @@ export DRUMS_URL=https://beta.drums.run/gw     # Drums Cloud gateway; or http://
 export DRUMS_TOKEN=drums_sk_...                # your API key
 ```
 
+The key is sent over HTTPS, or over plain HTTP to loopback only (`localhost`, `127.0.0.0/8`, `::1`). Any other
+`http://` URL raises `drums.InsecureTransport` before a request is made; `drums.connect(url, token,
+allow_insecure_http=True)` or `DRUMS_ALLOW_INSECURE_HTTP=1` opts in.
+
 Check the connection:
 
 ```python
@@ -183,13 +187,23 @@ The canonical list with every input schema is `drums/mcp_tools.json`; `tools/lis
 
 ### Safety
 
-- `destroy_computer`, `delete_snapshot` and `revoke_api_key` are refused unless `confirm` is `true`, before any
-  request is sent. Agents should tell the user before passing it.
+- Gated tools need `confirm: true` from the caller. `destroy_computer`, `delete_snapshot` and `revoke_api_key`
+  (the tools marked `destructive` in `mcp_tools.json`) are refused before any request is sent unless the tool
+  arguments carry `confirm: true`. The caller (the agent) supplies that argument; Drums does not prompt anyone.
+  Whether a person approves the call is the MCP client's job (Claude Code, Cursor and Codex each have their own
+  tool-approval settings): there is no confirmation step inside Drums, and `confirm: true` from the caller is the
+  only thing the server checks. `reset` also discards a computer's desktop state, but it is not gated.
+- The token only travels over HTTPS, or over plain HTTP to loopback (`localhost`, `127.0.0.0/8`, `::1`, where a
+  local drumsd listens). With a token set, any other `http://` URL in `--url` or `DRUMS_URL` is refused before a
+  request is sent, with a message naming the host and the opt-ins (never the token). To send the token over plain
+  HTTP anyway, opt in: `drums mcp --allow-insecure-http`, `DRUMS_ALLOW_INSECURE_HTTP=1`, or
+  `drums.connect(url, token, allow_insecure_http=True)` / `drums.Client(..., allow_insecure_http=True)` in the SDK
+  (the `Client` applies the same rule, so SDK scripts are covered too; the error is `drums.InsecureTransport`).
 - Arguments are checked against the tool's schema before anything is sent; a violation is a tool error naming the
   field. A tool failure is always a tool result with `isError`, never a protocol error.
 - `--print-config` prints placeholders (`<GATEWAY_URL>` when no URL is known, always `drums_sk_...`), never a key.
 - The token comes from `DRUMS_TOKEN`, else the file `DRUMS_TOKEN_FILE`, else `/etc/drums/token`; it is never
-  printed or written by the server.
+  printed or written by the server, and never appears in an error message.
 - Keys are workspace-scoped on the gateway: a key never sees another workspace's computers.
 - `create_api_key` returns the plaintext key once; nothing stores it.
 

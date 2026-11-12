@@ -55,7 +55,12 @@ poll `get_run` / `get_evaluation`. `list_runs` and `list_evaluations` filter by 
 ## Rules
 
 - Never call `destroy_computer`, `delete_snapshot` or `revoke_api_key` without telling the user first. They are
-  refused unless `confirm` is `true`; passing it is your statement that the user agreed.
+  refused unless the tool arguments carry `confirm: true`; you, the caller, supply it, and passing it is your
+  statement that the user agreed. Drums does not ask anyone: approval of the call belongs to the MCP client
+  (Claude Code, Cursor, Codex) and its tool-approval settings, not to the server.
+- The token is sent over HTTPS, or over plain HTTP to loopback only; `drums mcp` refuses any other `http://`
+  URL unless started with `--allow-insecure-http` (or `DRUMS_ALLOW_INSECURE_HTTP=1`). Do not add that opt-in on
+  the user's behalf.
 - Prefer `shell`, `read_file` and `list_dir` over GUI actions when you only need to check something; use the GUI
   for what the task actually asks a user to do.
 - Keep every computer id you create (and every fork child id) and report them; a lost id is a running desktop

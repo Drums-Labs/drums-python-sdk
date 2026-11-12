@@ -11,8 +11,15 @@ this release adds the local server and the client methods for the new gateway ro
 - `drums mcp` (the same as `python -m drums.mcp`): a stdio MCP server with the 34 workspace and desktop tools of
   `drums/mcp_tools.json`, the list the gateway serves. `--env <computer id>` binds the desktop tools to one computer;
   `--print-config claude|claude-local|cursor|codex` prints the matching client snippet with a placeholder key.
-  Destructive tools (`destroy_computer`, `delete_snapshot`, `revoke_api_key`) are refused unless `confirm` is true,
-  before any request is sent.
+  Destructive tools (`destroy_computer`, `delete_snapshot`, `revoke_api_key`) are refused unless the caller passes
+  `confirm: true` in the tool arguments, before any request is sent; the MCP client, not Drums, owns the user's
+  approval of such a call.
+- Token transport rule, in the `Client` and the CLI: a token is sent over https, or over plain http to loopback
+  only (`localhost`, `127.0.0.0/8`, `::1`). Any other `http://` URL (`--url`, `DRUMS_URL`) raises the new
+  `drums.InsecureTransport` before any request (exit 2 with a one-line message from `drums mcp`); the message names
+  the host and the opt-ins, never the token. Opt in with `drums mcp --allow-insecure-http`,
+  `DRUMS_ALLOW_INSECURE_HTTP=1`, or `connect(..., allow_insecure_http=True)` / `Client(..., allow_insecure_http=True)`.
+  `drums.check_transport(url, token, allow_insecure_http=None)` is the check itself.
 - `drums` console script (`drums mcp`, `drums version`); `mcp_tools.json` ships in the wheel.
 - `Client.runs`, `create_run`, `run`, `api_keys`, `create_api_key`, `revoke_api_key`, `audit` for the gateway's
   `/v1/runs`, `/v1/api-keys` and `/v1/audit` routes; `call()` takes extra headers.
