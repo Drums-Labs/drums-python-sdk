@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "drums": {
+      "command": "drums",
+      "args": ["mcp"],
+      "env": { "DRUMS_URL": "${DRUMS_URL}", "DRUMS_TOKEN": "${DRUMS_TOKEN}" }
+    }
+  }
+}

@@ -30,7 +30,10 @@ class FakeEnv:
         cmd = [a.replace("/home/user", self.root) for a in cmd]
         if cmd[0] == "timeout":                  # not on every test machine; the desktop has it
             cmd = cmd[2:]
-        p = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True)
+        except FileNotFoundError:                # a missing binary is exit 127 on the desktop, not an exception
+            return R({"returncode": 127, "output": "", "error": f"{cmd[0]}: command not found"})
         return R({"returncode": p.returncode, "output": p.stdout, "error": p.stderr})
 
     def screenshot(self):
@@ -74,7 +77,9 @@ class Mcp(unittest.TestCase):
     def test_json_rpc_session(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
-            srv = mcp.Server(FakeEnv(d))
+            fake = FakeEnv(d)
+            # bound to one desktop (--env s1): desktop tools need no computer_id; every env lookup is the stand-in
+            srv = mcp.Server(client=None, default_computer_id="s1", env_factory=lambda cid: fake)
             msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
                     {"jsonrpc": "2.0", "method": "notifications/initialized"},
                     {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},

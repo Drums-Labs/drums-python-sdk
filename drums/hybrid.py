@@ -32,7 +32,7 @@ import posixpath
 
 HOME = "/home/user"
 MAX_READ = 2 * 1024 * 1024
-CHUNK = 60_000
+CHUNK = 8_000  # one argv chunk: the gateway caps each step command argument at 8192 chars (contracts drumsActionSchema)
 SOFFICE = ["soffice", "-env:UserInstallation=file:///tmp/drums-hybrid-lo", "--headless", "--norestore"]
 
 
