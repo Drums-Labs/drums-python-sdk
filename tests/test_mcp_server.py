@@ -16,7 +16,7 @@ from drums import mcp  # noqa: E402
 
 TOKEN = "k" * 43
 HERE = os.path.dirname(os.path.abspath(__file__))
-TOOLS_JSON = os.path.join(HERE, "..", "drums", "mcp_tools.json")
+TOOLS_JSON = mcp.TOOLS_PATH  # the installed package's copy, so the test also proves the wheel ships it
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + (1920).to_bytes(4, "big") + (1080).to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
 CHECKPOINTS = [{"id": "osworld-ubuntu", "installed": True, "captured_from": None, "created_epoch": 1.0},
