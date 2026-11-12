@@ -14,6 +14,28 @@ class AuthError(DrumsError):
     """401: missing or wrong token."""
 
 
+class InsecureTransport(DrumsError):
+    """Refused before any request: a token would travel over plain HTTP to a host that is not loopback. The message
+    names the host and the opt-ins (`--allow-insecure-http`, `DRUMS_ALLOW_INSECURE_HTTP=1`, `allow_insecure_http=True`);
+    it never carries the token."""
+
+    def __init__(self, host: str, scheme: str = "http"):
+        super().__init__(0, f"refusing to send the Drums token over plain {scheme or 'http'} to {host}: use an https:// URL, "
+                            "or opt in with --allow-insecure-http (drums mcp), DRUMS_ALLOW_INSECURE_HTTP=1, "
+                            "or Client(..., allow_insecure_http=True)")
+        self.host, self.scheme = host, scheme
+
+
+class RedirectRefused(DrumsError):
+    """Refused: the server answered with a redirect the client will not follow with the token (a different origin,
+    i.e. scheme, host or port, or more than MAX_REDIRECTS hops). The message names the target's scheme, host and
+    port only: never the token, userinfo, path or query string."""
+
+    def __init__(self, message: str, target: str | None = None):
+        super().__init__(0, message)
+        self.target = target
+
+
 class BadRequest(DrumsError):
     """400: the request is wrong (bad task JSON, bad id, n out of range)."""
 

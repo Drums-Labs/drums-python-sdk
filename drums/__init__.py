@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures as cf
+import ipaddress
 import json
 import os
 import struct
@@ -44,32 +45,119 @@ import threading
 import warnings
 
 from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerError, CheckpointStale, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
-                     EnvGone, ForkError, GateFailed, GuestError, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RestoreFailed, TaskSetupFailed,
+                     EnvGone, ForkError, GateFailed, GuestError, InsecureTransport, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RedirectRefused, RestoreFailed, TaskSetupFailed,
                      TaskUnsupported)
 
-__version__ = "0.2.5"
+__version__ = "0.3.0"
 DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or "http://127.0.0.1:7070"
 DEFAULT_IMAGE = "osworld-ubuntu"
 
 __all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "ForkResult", "env", "__version__",
            "DrumsError", "AuthError", "BadRequest", "NotFound", "EnvGone", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
            "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded",
-           "CheckpointStale", "TaskUnsupported"]
+           "CheckpointStale", "TaskUnsupported", "InsecureTransport", "RedirectRefused", "check_transport"]
 
 _STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 410: EnvGone, 422: BadRequest, 429: Overloaded, 502: GuestError,
            503: DaemonUnavailable}
 
 
+def _is_loopback(host: str | None) -> bool:
+    """localhost, 127.0.0.0/8 or ::1 (the only hosts a token may reach over plain HTTP by default)."""
+    if not host:
+        return False
+    h = host.lower().rstrip(".")
+    if h == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def check_transport(url: str, token: str | None, allow_insecure_http: bool | None = None) -> None:
+    """Refuse (InsecureTransport) to pair `token` with a plain-HTTP `url` whose host is not loopback. No token, an
+    https URL, localhost / 127.0.0.0/8 / ::1, or the opt-in (`allow_insecure_http=True`, else
+    $DRUMS_ALLOW_INSECURE_HTTP=1) pass. Runs before any request; the error names the host, never the token."""
+    if not token:
+        return
+    if allow_insecure_http is None:
+        allow_insecure_http = os.environ.get("DRUMS_ALLOW_INSECURE_HTTP", "").strip().lower() in ("1", "true", "yes")
+    if allow_insecure_http:
+        return
+    u = urllib.parse.urlsplit(url)
+    if u.scheme.lower() == "https":
+        return
+    try:
+        host = u.hostname
+    except ValueError:
+        host = None
+    if _is_loopback(host):
+        return
+    raise InsecureTransport(host or "<no host>", u.scheme.lower())
+
+
+MAX_REDIRECTS = 5
+
+
+def _origin(url: str) -> tuple:
+    """(scheme, host, port) of a URL, the port explicit (80 / 443 when the URL leaves it out)."""
+    u = urllib.parse.urlsplit(url)
+    scheme = u.scheme.lower()
+    try:
+        host, port = (u.hostname or "").lower(), u.port
+    except ValueError:
+        host, port = "", None
+    if port is None:
+        port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    return scheme, host, port
+
+
+def _origin_text(url: str) -> str:
+    """scheme://host:port of a URL, for messages: no userinfo, path or query."""
+    scheme, host, port = _origin(url)
+    return f"{scheme or '?'}://{host or '<no host>'}{'' if port is None else f':{port}'}"
+
+
+class _RedirectPolicy(urllib.request.HTTPRedirectHandler):
+    """urllib follows redirects and re-sends every header, Authorization included. This handler follows a redirect only
+    to the SAME origin (scheme, host, port) as the request it answers, at most MAX_REDIRECTS hops per call, and runs
+    check_transport on the target first; any other hop raises RedirectRefused before a request is made, so the token
+    never reaches another origin or plain http off loopback by way of a Location header."""
+    max_redirections = MAX_REDIRECTS + 1    # the stdlib caps never fire first: hops are counted and refused below
+    max_repeats = MAX_REDIRECTS + 1
+    http_error_308 = urllib.request.HTTPRedirectHandler.http_error_302   # Python < 3.11 has no 308 handler
+
+    def __init__(self, token: str | None, allow_insecure_http: bool):
+        self.token, self.allow_insecure_http = token, allow_insecure_http
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        hops = sum((getattr(req, "redirect_dict", None) or {}).values())
+        if hops >= MAX_REDIRECTS:
+            fp.close()
+            raise RedirectRefused(f"refusing to follow more than {MAX_REDIRECTS} redirects from {_origin_text(req.full_url)} "
+                                  f"(HTTP {code}, next hop {_origin_text(newurl)})", _origin_text(newurl))
+        if _origin(newurl) != _origin(req.full_url):
+            fp.close()
+            raise RedirectRefused(f"refusing to follow the HTTP {code} redirect from {_origin_text(req.full_url)} to "
+                                  f"{_origin_text(newurl)}: the Drums token is only sent to the origin it was given",
+                                  _origin_text(newurl))
+        check_transport(newurl, self.token, self.allow_insecure_http)       # same origin, so this is defence in depth
+        # 308 keeps the method like 307; the stdlib's redirect_request learnt 308 in 3.11, so hand it 307 on older Pythons
+        return super().redirect_request(req, fp, 307 if code == 308 else code, msg, headers, newurl)
+
+
 def connect(url: str | None = None, token: str | None = None, *, timeout: float = 900.0, retry_s: float = 60.0, check: bool = True,
-            close_on_exit: bool = True, handle_signals: bool = True) -> "Client":
+            close_on_exit: bool = True, handle_signals: bool = True, allow_insecure_http: bool | None = None) -> "Client":
     """A client for one drumsd. `url`/`token` default to $DRUMS_URL / $DRUMS_TOKEN. With check=True the token is tried
     at once (AuthError / DaemonUnavailable here rather than on the first create).
+    A token is only sent over https, or over plain http to localhost / 127.0.0.0/8 / ::1; any other http URL raises
+    InsecureTransport before a request unless allow_insecure_http=True (or $DRUMS_ALLOW_INSECURE_HTTP=1).
     close_on_exit=True: the envs this client created and did not close are closed when the process exits (atexit) or
     when the client is used as a context manager and the block ends. handle_signals=True: SIGTERM and SIGHUP exit
     through that cleanup too, when their handler is still the default one (never replaces a handler you installed;
     main thread only). A `kill -9` cannot be caught: the server-side leases reap those envs."""
     c = Client(url or DEFAULT_URL, token if token is not None else os.environ.get("DRUMS_TOKEN"), timeout=timeout, retry_s=retry_s,
-               close_on_exit=close_on_exit, handle_signals=handle_signals)
+               close_on_exit=close_on_exit, handle_signals=handle_signals, allow_insecure_http=allow_insecure_http)
     if check:
         c.health()
     return c
@@ -96,9 +184,15 @@ class Client:
     """A connection to one drumsd (use drums.connect). Creates envs, lists them, and reads health and metrics."""
 
     def __init__(self, url: str = DEFAULT_URL, token: str | None = None, timeout: float = 900.0, retry_s: float = 60.0,
-                 close_on_exit: bool = False, handle_signals: bool = False):
+                 close_on_exit: bool = False, handle_signals: bool = False, allow_insecure_http: bool | None = None):
         self.url, self.timeout, self.retry_s = url.rstrip("/"), timeout, retry_s
         self.token = token if token is not None else os.environ.get("DRUMS_TOKEN")
+        check_transport(self.url, self.token, allow_insecure_http)   # InsecureTransport: a token over plain http off-loopback
+        if allow_insecure_http is None:
+            allow_insecure_http = os.environ.get("DRUMS_ALLOW_INSECURE_HTTP", "").strip().lower() in ("1", "true", "yes")
+        self.allow_insecure_http = bool(allow_insecure_http)
+        # redirects: same origin only, MAX_REDIRECTS hops, check_transport on every hop (RedirectRefused otherwise)
+        self._opener = urllib.request.build_opener(_RedirectPolicy(self.token, self.allow_insecure_http))
         self._owned: dict[str, None] = {}          # ids of envs this client created and has not closed (insertion order)
         self._owned_lock = threading.Lock()
         self.close_on_exit = close_on_exit
@@ -168,11 +262,13 @@ class Client:
         self.close()
 
     # transport --------------------------------------------------------------------------------------------------------
-    def call(self, method: str, path: str, body=None, raw: bool = False, timeout: float | None = None):
+    def call(self, method: str, path: str, body=None, raw: bool = False, timeout: float | None = None, headers: dict | None = None):
         """One request. GETs are retried while drumsd is unreachable (up to retry_s: a restarting drumsd comes back and
-        reconciles); other methods are never retried, since their outcome is unknown after a dropped connection."""
+        reconciles); other methods are never retried, since their outcome is unknown after a dropped connection.
+        `headers` are added to the request (e.g. Idempotency-Key). A redirect is followed only to the same origin
+        (scheme, host, port), at most MAX_REDIRECTS hops; any other redirect raises RedirectRefused unfollowed."""
         data = None if body is None else json.dumps(body).encode()
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **(headers or {})}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         deadline = time.monotonic() + (self.retry_s if method == "GET" else 0.0)
@@ -180,7 +276,7 @@ class Client:
         while True:
             req = urllib.request.Request(self.url + path, data=data, method=method, headers=headers)
             try:
-                with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
+                with self._opener.open(req, timeout=timeout or self.timeout) as r:
                     b = r.read()
                     return b if raw else json.loads(b or b"null")
             except urllib.error.HTTPError as e:
@@ -265,6 +361,46 @@ class Client:
             after = r.get("next_after")
             if not after:
                 return
+
+    # gateway: runs, API keys, audit log ---------------------------------------------------------------------------------
+    # These routes exist on the Drums gateway only; a plain drumsd answers 404 (NotFound).
+    def runs(self, kind: str | None = None, status: str | None = None, limit: int = 50) -> dict:
+        """The workspace's runs, newest first (GET /v1/runs): {"items": [run rows], "next_cursor"}. `kind` filters
+        (e.g. "evaluation"), `status` too (queued, running, completed, failed, cancelled)."""
+        q = {k: v for k, v in (("kind", kind), ("status", status), ("limit", limit)) if v is not None}
+        return self.call("GET", "/v1/runs?" + urllib.parse.urlencode(q))
+
+    def create_run(self, spec: dict, idempotency_key: str | None = None) -> dict:
+        """Submit a RunSpec (POST /v1/runs): {"run_id", "operation_id", "status", "created"}. With `idempotency_key`
+        (the Idempotency-Key header) the same key with the same spec returns the same run."""
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        return self.call("POST", "/v1/runs", spec, headers=headers)
+
+    def run(self, run_id: str) -> dict:
+        """One run (GET /v1/runs/{id}): its row, the attempts summary and the last events."""
+        return self.call("GET", f"/v1/runs/{urllib.parse.quote(str(run_id))}")
+
+    def api_keys(self) -> dict:
+        """The workspace's API keys, metadata only (GET /v1/api-keys): {"items": [{id, name, prefix, scopes, ...}]}."""
+        return self.call("GET", "/v1/api-keys")
+
+    def create_api_key(self, name: str, scopes: list, expires_in_days: int | None = None) -> dict:
+        """A new API key (POST /v1/api-keys): {"id", "prefix", "key", "expires_at"}. `key` is the plaintext, shown
+        once; the scopes cannot exceed this client's own."""
+        body = {"name": name, "scopes": list(scopes)}
+        if expires_in_days is not None:
+            body["expires_in_days"] = expires_in_days
+        return self.call("POST", "/v1/api-keys", body)
+
+    def revoke_api_key(self, key_id: str) -> dict:
+        """Revoke an API key (DELETE /v1/api-keys/{id}): {"id", "revoked_at"}. A key cannot revoke itself."""
+        return self.call("DELETE", f"/v1/api-keys/{urllib.parse.quote(str(key_id))}")
+
+    def audit(self, action: str | None = None, limit: int = 50, cursor: str | None = None) -> dict:
+        """The workspace's audit log, newest first (GET /v1/audit): {"items": [events], "next_cursor"}. `action`
+        filters by prefix (e.g. "mcp", "computer.create")."""
+        q = {k: v for k, v in (("action", action), ("limit", limit), ("cursor", cursor)) if v is not None}
+        return self.call("GET", "/v1/audit?" + urllib.parse.urlencode(q))
 
     def _task(self, task):
         if task is None or isinstance(task, dict):
