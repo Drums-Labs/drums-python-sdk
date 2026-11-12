@@ -1,4 +1,4 @@
-# Build, check and publish the `drums` package.
+# Build, check and publish the `drums-sdk` package (import name: drums).
 #
 #   push of a tag v*         -> build, test, publish to PyPI (environment "pypi", Trusted Publishing)
 #   workflow_dispatch        -> build, test, publish to TestPyPI (environment "testpypi", Trusted Publishing)
@@ -95,7 +95,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: testpypi
-      url: https://test.pypi.org/project/drums/${{ needs.build.outputs.version }}/
+      url: https://test.pypi.org/project/drums-sdk/${{ needs.build.outputs.version }}/
     permissions:
       id-token: write
     steps:
@@ -117,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/drums/${{ needs.build.outputs.version }}/
+      url: https://pypi.org/project/drums-sdk/${{ needs.build.outputs.version }}/
     permissions:
       id-token: write
     steps:

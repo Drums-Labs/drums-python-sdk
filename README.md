@@ -1,4 +1,4 @@
-# drums
+# drums-sdk
 
 Python SDK for [Drums](https://drums.run): isolated desktop environments for computer-use agents and RL.
 Create a desktop, act in it, take screenshots, fork it into copies of the same state, and score it with a task's
@@ -12,7 +12,13 @@ Full documentation: **[console.drums.run/docs](https://console.drums.run/docs)**
 
 ```bash
 python3 -m venv drums-venv
-drums-venv/bin/pip install drums
+drums-venv/bin/pip install drums-sdk
+```
+
+The package on PyPI is `drums-sdk`; the import name is `drums`.
+
+```python
+import drums
 ```
 
 ### 2. Point it at your Drums

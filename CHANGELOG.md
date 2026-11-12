@@ -5,7 +5,7 @@ SDK version was built against is noted where it matters.
 
 ## 0.2.5 - first release on PyPI
 
-The first version published as `pip install drums`. Versions 0.2.0 to 0.2.4 shipped as wheels sent with invites.
+The first version published on PyPI, as `drums-sdk` (`pip install drums-sdk`; the import name stays `drums`). Versions 0.2.0 to 0.2.4 shipped as wheels sent with invites.
 Everything below in the 0.2.x entries is included.
 
 Packaging and release:

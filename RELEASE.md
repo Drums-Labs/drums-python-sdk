@@ -1,4 +1,7 @@
-# Releasing `drums` to PyPI
+# Releasing `drums-sdk` to PyPI
+
+The distribution on PyPI is `drums-sdk`; the import name stays `drums`. (PyPI rejected the name `drums` as
+too similar to the existing project `drum`.)
 
 The release is automated by `.github/workflows/release.yml`. A pushed tag `vX.Y.Z` builds, checks and tests the
 package and publishes it to PyPI; a manual run of the workflow publishes to TestPyPI first. No tokens are stored in
@@ -21,7 +24,7 @@ Commit that change on `main` before tagging.
 
 ### 0.2 Register the Trusted Publisher on PyPI
 
-The `drums` project does not exist on PyPI yet, so register a **pending** publisher (it becomes the project's
+The `drums-sdk` project does not exist on PyPI yet, so register a **pending** publisher (it becomes the project's
 publisher on the first upload). Signed in to pypi.org as the account that will own the project:
 
 1. Open https://pypi.org/manage/account/publishing/
@@ -29,7 +32,7 @@ publisher on the first upload). Signed in to pypi.org as the account that will o
 
    | Field | Value |
    |---|---|
-   | PyPI project name | `drums` |
+   | PyPI project name | `drums-sdk` |
    | Owner | `Drums-Labs` |
    | Repository name | `drums-python-sdk` |
    | Workflow name | `release.yml` |
@@ -77,11 +80,11 @@ dependencies), and `--no-deps` makes sure nothing is pulled from anywhere else:
 
 ```bash
 cd "$(mktemp -d)"
-python3 -m venv v && v/bin/pip install --no-deps -i https://test.pypi.org/simple/ drums
+python3 -m venv v && v/bin/pip install --no-deps -i https://test.pypi.org/simple/ drums-sdk
 v/bin/python -c 'import drums; print(drums.__version__); drums.Client'
 ```
 
-Check https://test.pypi.org/project/drums/ : the README renders, the links are right, the license shows.
+Check https://test.pypi.org/project/drums-sdk/ : the README renders, the links are right, the license shows.
 
 ## 3. Tag and publish to PyPI
 
@@ -99,11 +102,11 @@ tab. The job prints the SHA256 of every file it uploads.
 
 ```bash
 cd "$(mktemp -d)"
-python3 -m venv v && v/bin/pip install drums
+python3 -m venv v && v/bin/pip install drums-sdk
 v/bin/python -c 'import drums; print(drums.__version__); drums.Client'
 ```
 
-Then check https://pypi.org/project/drums/ and create the GitHub release from the tag:
+Then check https://pypi.org/project/drums-sdk/ and create the GitHub release from the tag:
 
 ```bash
 gh release create "v$V" --title "drums $V" --notes-file <(awk "/^## $V/{f=1;next} /^## /{f=0} f" CHANGELOG.md)
@@ -115,4 +118,4 @@ gh release create "v$V" --title "drums $V" --notes-file <(awk "/^## $V/{f=1;next
   `CHANGELOG.md` entry, merge, then steps 2 to 4. The workflow fails if the tag and the version disagree.
 - A version can be uploaded to PyPI exactly once. A broken release gets a new patch version, never a re-upload.
 - Update the install instructions in the docs (`console.drums.run/docs/quickstart` and
-  `/docs/reference/python-sdk` still describe installing from a wheel file) to `pip install drums`.
+  `/docs/reference/python-sdk` still describe installing from a wheel file) to `pip install drums-sdk`.
