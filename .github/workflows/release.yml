@@ -1,0 +1,132 @@
+# Build, check and publish the `drums-sdk` package (import name: drums).
+#
+#   push of a tag v*         -> build, test, publish to PyPI (environment "pypi", Trusted Publishing)
+#   workflow_dispatch        -> build, test, publish to TestPyPI (environment "testpypi", Trusted Publishing)
+#
+# No tokens live in this repository. Publishing uses PyPI Trusted Publishing (OIDC): the job requests an id-token,
+# pypi.org checks it against the publisher registered for the project. Fallback: if a PYPI_API_TOKEN (or
+# TEST_PYPI_API_TOKEN) repository secret exists, the publish action uses it instead of OIDC. See RELEASE.md.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build sdist and wheel
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Read the version
+        id: meta
+        run: |
+          v=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "package version: $v"
+      - name: Release gates
+        run: |
+          set -e
+          grep -Eq '^license = "' pyproject.toml \
+            || { echo 'pyproject.toml: the license line is still commented out (RELEASE.md step 0)'; exit 1; }
+          grep -q 'PLACEHOLDER' LICENSE && { echo 'LICENSE is still a placeholder'; exit 1; }
+          python - <<'PY'
+          import re, tomllib
+          v = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          src = open("drums/__init__.py").read()
+          m = re.search(r'^__version__ = "([^"]+)"', src, re.M)
+          assert m and m.group(1) == v, f"drums.__version__ {m and m.group(1)} != pyproject {v}"
+          print("version in sync:", v)
+          PY
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            [ "${GITHUB_REF_NAME}" = "v${{ steps.meta.outputs.version }}" ] \
+              || { echo "tag ${GITHUB_REF_NAME} does not match version v${{ steps.meta.outputs.version }}"; exit 1; }
+          fi
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  test:
+    name: test the wheel on ${{ matrix.python }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Install the wheel into a clean venv and run the tests against it
+        run: |
+          python -m venv v
+          v/bin/pip install --quiet dist/*.whl
+          v/bin/python -c 'import drums; assert drums.Client; print("drums", drums.__version__)'
+          # The tests must import the installed wheel, not the checkout: run them from another directory.
+          mkdir -p run && cp -r tests run/tests && cd run
+          ../v/bin/python -m unittest discover -s tests -v
+
+  publish-testpypi:
+    name: publish to TestPyPI
+    if: github.event_name == 'workflow_dispatch'
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/drums-sdk/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # Empty when the secret does not exist: the action then uses Trusted Publishing (OIDC).
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          print-hash: true
+
+  publish-pypi:
+    name: publish to PyPI
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/drums-sdk/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Empty when the secret does not exist: the action then uses Trusted Publishing (OIDC).
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          print-hash: true

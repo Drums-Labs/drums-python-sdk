@@ -1,10 +1,45 @@
-[project]
-name = "drums"
-version = "0.2.5"
-description = "Drums SDK: isolated desktop environments for computer-use RL (client for drumsd)"
-requires-python = ">=3.9"
-license = {text = "Apache-2.0"}
-
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "drums-sdk"
+version = "0.2.5"
+# Distribution name drums-sdk (PyPI rejects "drums" as too similar to an existing project); import name: drums.
+description = "Drums SDK: isolated desktop environments for computer-use RL. Create a desktop, act, screenshot, fork, verify."
+readme = "README.md"
+requires-python = ">=3.9"
+# SPDX expression (PEP 639); setuptools forbids a "License ::" classifier next to it. The release workflow checks
+# that this line is set and that LICENSE holds the license text.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "Drums Labs"}]
+keywords = ["drums", "computer-use", "reinforcement-learning", "rl", "desktop", "environment", "osworld", "agents", "sandbox"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# Standard library only: no runtime dependencies.
+dependencies = []
+
+[project.urls]
+Homepage = "https://drums.run"
+Documentation = "https://console.drums.run/docs"
+"SDK reference" = "https://console.drums.run/docs/reference/python-sdk"
+Repository = "https://github.com/Drums-Labs/drums-python-sdk"
+Changelog = "https://github.com/Drums-Labs/drums-python-sdk/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Drums-Labs/drums-python-sdk/issues"
+
+[tool.setuptools]
+packages = ["drums"]

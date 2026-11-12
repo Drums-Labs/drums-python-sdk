@@ -20,7 +20,7 @@ class BadRequest(DrumsError):
 
 class TaskUnsupported(BadRequest):
     """422 `task_unsupported`: the task needs the agent itself to act as root, and agents get no privilege escalation
-    in this execution profile (docs/custom-tasks.md). Nothing was started. `task_id` and `reason` say which and why.
+    in this execution profile (https://console.drums.run/docs/concepts/tasks-and-verifiers). Nothing was started. `task_id` and `reason` say which and why.
     A task whose setup alone needs root is supported: drumsd runs that step as trusted provisioning."""
 
     def __init__(self, status: int, message: str, body=None):
