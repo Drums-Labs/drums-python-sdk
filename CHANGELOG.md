@@ -3,23 +3,6 @@
 All notable changes to the `drums` Python SDK. The SDK talks to drumsd over its HTTP API; the drumsd version each
 SDK version was built against is noted where it matters.
 
-## 0.3.0 - unreleased (after 0.2.5 is on PyPI)
-
-The MCP server and the `drums` command. The hosted MCP endpoint on the gateway (`<gateway URL>/mcp`) is live already;
-this release adds the local server and the client methods for the new gateway routes.
-
-- `drums mcp` (the same as `python -m drums.mcp`): a stdio MCP server with the 34 workspace and desktop tools of
-  `drums/mcp_tools.json`, the list the gateway serves. `--env <computer id>` binds the desktop tools to one computer;
-  `--print-config claude|claude-local|cursor|codex` prints the matching client snippet with a placeholder key.
-  Destructive tools (`destroy_computer`, `delete_snapshot`, `revoke_api_key`) are refused unless `confirm` is true,
-  before any request is sent.
-- `drums` console script (`drums mcp`, `drums version`); `mcp_tools.json` ships in the wheel.
-- `Client.runs`, `create_run`, `run`, `api_keys`, `create_api_key`, `revoke_api_key`, `audit` for the gateway's
-  `/v1/runs`, `/v1/api-keys` and `/v1/audit` routes; `call()` takes extra headers.
-- The repository is a Claude Code plugin (`.claude-plugin/plugin.json`, `.mcp.json`, the `drums-workflow` skill).
-- `drums.hybrid` `write_file` sends chunks of 8000 base64 characters (the gateway caps a step argument at 8192);
-  `gui` code is at most 16384 characters.
-
 ## 0.2.5 - first release on PyPI
 
 The first version published on PyPI, as `drums-sdk` (`pip install drums-sdk`; the import name stays `drums`). Versions 0.2.0 to 0.2.4 shipped as wheels sent with invites.

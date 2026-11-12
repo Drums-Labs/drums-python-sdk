@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "drums-sdk"
-version = "0.3.0"
+version = "0.2.5"
 # Distribution name drums-sdk (PyPI rejects "drums" as too similar to an existing project); import name: drums.
 description = "Drums SDK: isolated desktop environments for computer-use RL. Create a desktop, act, screenshot, fork, verify."
 readme = "README.md"
@@ -41,11 +41,5 @@ Repository = "https://github.com/Drums-Labs/drums-python-sdk"
 Changelog = "https://github.com/Drums-Labs/drums-python-sdk/blob/main/CHANGELOG.md"
 Issues = "https://github.com/Drums-Labs/drums-python-sdk/issues"
 
-[project.scripts]
-drums = "drums.cli:main"
-
 [tool.setuptools]
 packages = ["drums"]
-
-[tool.setuptools.package-data]
-drums = ["mcp_tools.json"]

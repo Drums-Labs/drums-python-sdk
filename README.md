@@ -82,7 +82,7 @@ for an invalid episode instead of returning a reward.
   ([guide](https://console.drums.run/docs/guides/group-rollouts-with-fork))
 - Run a policy over many tasks: [Evaluate on OSWorld](https://console.drums.run/docs/guides/evaluate-on-osworld)
 - `drums.aio` is the asyncio variant of the same calls; `drums.hybrid` adds shell, file and app-API tools over one
-  desktop; `drums mcp` serves the whole workflow to an agent over MCP (stdio), see [MCP server](#mcp-server).
+  desktop; `python -m drums.mcp` serves them to an agent over MCP (stdio).
 - Every method: [Python SDK reference](https://console.drums.run/docs/reference/python-sdk).
   Every endpoint: [HTTP API](https://console.drums.run/docs/reference/http-api).
   If something fails: [Errors](https://console.drums.run/docs/reference/errors).
@@ -98,100 +98,6 @@ for an invalid episode instead of returning a reward.
   DELETE are never retried: after a lost reply the outcome is unknown, so check `client.envs()` before trying again.
 - **Errors.** Every failure is a typed exception under `drums.DrumsError` carrying the server's status, message and
   body; errors about a desktop carry its record and gate report.
-
-## MCP server
-
-`drums mcp` (the same as `python -m drums.mcp`) is an MCP server on stdio that gives an agent the whole workflow:
-start a computer, act in it, verify against a task checker, fork and reset it, and read run results. It talks to
-the Drums gateway (or a plain drumsd for the desktop tools) at `DRUMS_URL` with `DRUMS_TOKEN`.
-
-```
-drums mcp                        # all tools; desktop tools take computer_id
-drums mcp --env <computer_id>    # desktop tools default to this computer
-drums mcp --create [--task FILE] # create one computer, bind it, close it on exit
-drums mcp --print-config claude|claude-local|cursor|codex
-```
-
-The same tool list is served remotely by the gateway at `<GATEWAY_URL>/mcp` (MCP Streamable HTTP, authenticated
-with a workspace API key; Drums MCP uses API keys, not OAuth). Replace `<GATEWAY_URL>` with your workspace's gateway
-URL and `drums_sk_...` with a key from the console.
-
-Claude Code, remote:
-
-```
-claude mcp add --transport http drums <GATEWAY_URL>/mcp --header "Authorization: Bearer drums_sk_..."
-```
-
-Claude Code, local (this package):
-
-```
-claude mcp add drums -e DRUMS_URL=<GATEWAY_URL> -e DRUMS_TOKEN=drums_sk_... -- drums mcp
-```
-
-Cursor (`~/.cursor/mcp.json` or `.cursor/mcp.json`):
-
-```json
-{"mcpServers": {"drums": {"url": "<GATEWAY_URL>/mcp", "headers": {"Authorization": "Bearer drums_sk_..."}}}}
-```
-
-Codex (`~/.codex/config.toml`):
-
-```toml
-[mcp_servers.drums]
-command = "drums"
-args = ["mcp"]
-env = { DRUMS_URL = "<GATEWAY_URL>", DRUMS_TOKEN = "drums_sk_..." }
-```
-
-This repository is also a Claude Code plugin (`.claude-plugin/plugin.json`, `.mcp.json`, and the
-`drums-workflow` skill under `skills/`), which installs the server and a skill that teaches the loop below.
-
-### Tools
-
-Workspace tools (the gateway's HTTP API; `*` needs the Drums gateway and answers "not available on this server"
-against a plain drumsd):
-
-| tool | what it does |
-|---|---|
-| `list_templates` | base desktop images a computer can start from |
-| `list_computers`, `get_computer` | the workspace's computers: state, validity, task |
-| `create_computer` | a new computer from a template or snapshot, optionally with a task |
-| `destroy_computer` | close a computer for good (destructive) |
-| `list_snapshots`, `create_snapshot`, `delete_snapshot` | saved desktop states (delete is destructive) |
-| `list_tasks`, `get_task` | the verified computer-use tasks on the host |
-| `list_runs`, `create_run`, `get_run` * | runs: submit a RunSpec, read status, counts and events |
-| `list_evaluations`, `create_evaluation`, `get_evaluation` * | runs with kind `evaluation` |
-| `list_api_keys`, `create_api_key`, `revoke_api_key` * | API keys (metadata only; revoke is destructive) |
-| `read_audit_log` * | who did what, newest first; MCP calls appear as `mcp.<tool>` |
-
-Desktop tools (each takes `computer_id`):
-
-| tool | what it does |
-|---|---|
-| `gui` | pyautogui code in the desktop (1920x1080) |
-| `screenshot` | a PNG of the desktop (image content) |
-| `shell` | a bash command as the desktop user (no root, no internet) |
-| `read_file`, `write_file`, `list_dir` | the desktop's files (`~` is `/home/user`) |
-| `office_convert`, `spreadsheet_read` | LibreOffice conversions and sheet reads |
-| `browser_tabs`, `browser_open` | Chrome tabs through its DevTools port (1337) |
-| `load_task` | load a task into a running computer (setup runs, a new episode starts) |
-| `verify` | score the desktop with the task's checker: score, valid, trusted, audit flags |
-| `fork` | n children that continue from this exact state; the parent keeps running |
-| `reset` | back to the clean template state; the task's setup runs again |
-
-The canonical list with every input schema is `drums/mcp_tools.json`; `tools/list` returns exactly it, in order.
-
-### Safety
-
-- `destroy_computer`, `delete_snapshot` and `revoke_api_key` are refused unless `confirm` is `true`, before any
-  request is sent. Agents should tell the user before passing it.
-- Arguments are checked against the tool's schema before anything is sent; a violation is a tool error naming the
-  field. A tool failure is always a tool result with `isError`, never a protocol error.
-- `--print-config` prints placeholders (`<GATEWAY_URL>` when no URL is known, always `drums_sk_...`), never a key.
-- The token comes from `DRUMS_TOKEN`, else the file `DRUMS_TOKEN_FILE`, else `/etc/drums/token`; it is never
-  printed or written by the server.
-- Keys are workspace-scoped on the gateway: a key never sees another workspace's computers.
-- `create_api_key` returns the plaintext key once; nothing stores it.
 
 ## Development
 
