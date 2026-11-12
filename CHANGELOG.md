@@ -3,7 +3,7 @@
 All notable changes to the `drums` Python SDK. The SDK talks to drumsd over its HTTP API; the drumsd version each
 SDK version was built against is noted where it matters.
 
-## 0.3.0 - unreleased (after 0.2.5 is on PyPI)
+## 0.3.0 - 2026-11-12
 
 The MCP server and the `drums` command. The hosted MCP endpoint on the gateway (`<gateway URL>/mcp`) is live already;
 this release adds the local server and the client methods for the new gateway routes.
