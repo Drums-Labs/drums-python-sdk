@@ -203,6 +203,20 @@ class GatewayTests(unittest.TestCase):
         for n in ("destroy_computer", "delete_snapshot", "revoke_api_key"):
             self.assertTrue(byname[n]["destructiveHint"], n)
 
+    def test_initialize_and_tools_list_send_nothing_and_the_transport_rule_holds_for_the_server(self):
+        # initialize and tools/list are answered from mcp_tools.json: no request reaches the gateway
+        srv = mcp.Server(drums.Client("https://beta.drums.run/gw", TOKEN))
+        self.assertEqual(self.rpc(srv, "initialize")["result"]["serverInfo"]["name"], "drums")
+        self.assertEqual(len(self.rpc(srv, "tools/list")["result"]["tools"]), 34)
+        self.assertEqual(FakeGateway.calls, [])
+        # the Server never gets a client that would send the token over plain http off loopback
+        with self.assertRaises(drums.InsecureTransport) as cm:
+            mcp.Server(drums.Client("http://beta.drums.run/gw", TOKEN))
+        self.assertNotIn(TOKEN, str(cm.exception))
+        self.assertIn("beta.drums.run", str(cm.exception))
+        # a plain drumsd on loopback (this test's gateway) needs no opt-in
+        self.assertEqual(self.rpc(mcp.Server(drums.Client(self.url, TOKEN)), "ping")["result"], {})
+
     def test_initialize_ping_unknown_method_notifications_and_parse_errors(self):
         r = self.rpc(self.srv, "initialize", {"protocolVersion": "2024-11-05", "capabilities": {}})["result"]
         self.assertEqual(r["protocolVersion"], "2024-11-05")

@@ -14,7 +14,7 @@ SECRET = "drums_sk_abcdefghijkl_" + "Z" * 43
 
 def run(argv, env=None):
     out, err = io.StringIO(), io.StringIO()
-    saved = {k: os.environ.get(k) for k in ("DRUMS_TOKEN", "DRUMS_URL", "DRUMS_TOKEN_FILE")}
+    saved = {k: os.environ.get(k) for k in ("DRUMS_TOKEN", "DRUMS_URL", "DRUMS_TOKEN_FILE", "DRUMS_ALLOW_INSECURE_HTTP", "DRUMS_API_KEY")}
     for k in saved:
         os.environ.pop(k, None)
     os.environ.update(env or {})
@@ -49,6 +49,24 @@ class Cli(unittest.TestCase):
             self.assertNotIn("Z" * 10, out, client)
             self.assertIn("https://beta.drums.run/gw", out, client)
             self.assertNotIn("<GATEWAY_URL>", out, client)
+
+    def test_print_config_never_prints_a_token_from_drums_api_key_or_drums_token(self):
+        for var in ("DRUMS_API_KEY", "DRUMS_TOKEN"):
+            for url in ("https://beta.drums.run/gw", "http://example.com:7070"):
+                for client in cli.CLIENTS:
+                    rc, out, err = run(["mcp", "--print-config", client], {var: SECRET, "DRUMS_URL": url})
+                    self.assertEqual(rc, 0, (var, url, client))
+                    self.assertNotIn(SECRET, out + err, (var, url, client))
+                    self.assertNotIn("Z" * 10, out + err, (var, url, client))
+                    self.assertIn("drums_sk_...", out, (var, url, client))
+                    self.assertEqual(err, "", (var, url, client))
+
+    def test_mcp_refuses_a_token_over_plain_http_off_loopback_naming_the_flag(self):
+        rc, out, err = run(["mcp", "--url", "http://example.com"], {"DRUMS_TOKEN": SECRET})
+        self.assertEqual(rc, 2)
+        self.assertIn("--allow-insecure-http", err)
+        self.assertNotIn(SECRET, out + err)
+        self.assertIn("--allow-insecure-http", run(["mcp", "--help"])[1])
 
     def test_print_config_exact_snippets(self):
         env = {"DRUMS_TOKEN": SECRET}
