@@ -9,18 +9,10 @@ the repository: publishing uses PyPI Trusted Publishing (OIDC). The commands bel
 
 ## 0. One-time decisions and setup (owner)
 
-### 0.1 Confirm the license
+### 0.1 License
 
-`LICENSE` contains the Apache License 2.0 text (recommended, and what `pyproject.toml` declared from the first
-commit). The SPDX line in `pyproject.toml` is commented out until you confirm; the workflow refuses to publish
-while it is.
-
-- To release under Apache-2.0: in `pyproject.toml` replace `# license = "Apache-2.0"` with `license = "Apache-2.0"`
-  and add `"License :: OSI Approved :: Apache Software License",` to `classifiers`.
-- To release under another license: replace the contents of `LICENSE`, set `license = "<SPDX id>"` and the matching
-  classifier.
-
-Commit that change on `main` before tagging.
+Apache License 2.0 (`LICENSE`, `license = "Apache-2.0"` in `pyproject.toml`, confirmed 2026-11-12). The workflow
+refuses to publish if the line is removed or `LICENSE` is a placeholder.
 
 ### 0.2 Register the Trusted Publisher on PyPI
 
@@ -55,7 +47,7 @@ exists and OIDC otherwise. Never paste a token into a file, a command line or a 
 
 ## 1. Merge the release PR
 
-Merge `pypi-release` into `main` (after step 0.1 is committed on it or on `main`). Confirm `main` is what you want
+Merge `pypi-release` into `main`. Confirm `main` is what you want
 to ship:
 
 ```bash

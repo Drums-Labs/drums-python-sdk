@@ -9,10 +9,8 @@ version = "0.2.5"
 description = "Drums SDK: isolated desktop environments for computer-use RL. Create a desktop, act, screenshot, fork, verify."
 readme = "README.md"
 requires-python = ">=3.9"
-# License: the owner's decision (RELEASE.md, step 0). LICENSE holds the text; when the choice is confirmed,
-# set its SPDX id here and add the matching "License :: OSI Approved :: ..." classifier. The release
-# workflow refuses to publish while this line is commented out.
-# license = "Apache-2.0"
+# The release workflow checks that this line is set and that LICENSE holds the license text.
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{name = "Drums Labs"}]
 keywords = ["drums", "computer-use", "reinforcement-learning", "rl", "desktop", "environment", "osworld", "agents", "sandbox"]
@@ -20,6 +18,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
