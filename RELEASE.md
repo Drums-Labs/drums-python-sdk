@@ -16,8 +16,9 @@ refuses to publish if the line is removed or `LICENSE` is a placeholder.
 
 ### 0.2 Register the Trusted Publisher on PyPI
 
-The `drums-sdk` project does not exist on PyPI yet, so register a **pending** publisher (it becomes the project's
-publisher on the first upload). Signed in to pypi.org as the account that will own the project:
+Done for `drums-sdk` since 0.2.5; kept here for a new project or a new owner account. Before the first upload,
+register a **pending** publisher (it becomes the project's publisher on that upload). Signed in to pypi.org as the
+account that owns the project:
 
 1. Open https://pypi.org/manage/account/publishing/
 2. Under "Add a new pending publisher", choose **GitHub** and enter exactly:
@@ -47,8 +48,7 @@ exists and OIDC otherwise. Never paste a token into a file, a command line or a 
 
 ## 1. Merge the release PR
 
-Merge `pypi-release` into `main`. Confirm `main` is what you want
-to ship:
+Merge the release PR into `main`. Confirm `main` is what you want to ship:
 
 ```bash
 git checkout main && git pull --ff-only
@@ -104,10 +104,9 @@ Then check https://pypi.org/project/drums-sdk/ and create the GitHub release fro
 gh release create "v$V" --title "drums $V" --notes-file <(awk "/^## $V/{f=1;next} /^## /{f=0} f" CHANGELOG.md)
 ```
 
-## 5. After the first release
+## 5. Later releases
 
-- Later releases: bump `version` in `pyproject.toml` and `__version__` in `drums/__init__.py` together, add a
+- Bump `version` in `pyproject.toml` and `__version__` in `drums/__init__.py` together, add a
   `CHANGELOG.md` entry, merge, then steps 2 to 4. The workflow fails if the tag and the version disagree.
 - A version can be uploaded to PyPI exactly once. A broken release gets a new patch version, never a re-upload.
-- Update the install instructions in the docs (`console.drums.run/docs/quickstart` and
-  `/docs/reference/python-sdk` still describe installing from a wheel file) to `pip install drums-sdk`.
+- When the docs mention a specific SDK version (quickstart, SDK reference, MCP guide), update them in the same week.

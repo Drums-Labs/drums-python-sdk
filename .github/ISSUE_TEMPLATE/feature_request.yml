@@ -1,0 +1,36 @@
+name: Feature request
+description: A method, option, tool or behaviour you need from the SDK or the MCP server.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The workflow, not the solution. What do you do today instead?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: The call, option or tool as you would write it. Pseudo-code is fine.
+      render: python
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Python client (drums, drums.aio)
+        - MCP server or drums command
+        - hybrid tools (shell, files, office, browser)
+        - errors and validity
+        - packaging or docs
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Links to the docs page or the gateway route involved, if you know them.
