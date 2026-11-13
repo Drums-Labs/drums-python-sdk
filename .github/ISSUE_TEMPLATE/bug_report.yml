@@ -1,0 +1,60 @@
+name: Bug report
+description: Something in the SDK, the drums command or the MCP server does not behave as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Do not paste an API key anywhere in this issue; if one was exposed, revoke it first.
+        Security problems go through private reporting, not an issue: see SECURITY.md.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Smallest script or command that shows it
+      description: Python or shell, as pasted. Replace the key with drums_sk_...
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error output
+      description: The full traceback or the error text. Gateway errors carry a request_id (gw_...); include it.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: SDK version
+      description: Output of `drums version` or `python -c "import drums; print(drums.__version__)"`
+      placeholder: drums 0.3.0
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version and OS
+      placeholder: Python 3.12.5, macOS 15 / Ubuntu 24.04
+    validations:
+      required: true
+  - type: dropdown
+    id: server
+    attributes:
+      label: Server
+      options:
+        - Drums Cloud (beta.drums.run)
+        - self-hosted drumsd
+        - the fake gateway in tests
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime version
+      description: Output of `client.health()["version"]`, if you can reach the server.

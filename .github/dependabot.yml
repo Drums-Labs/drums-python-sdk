@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # The package has no runtime dependencies; this covers the build backend pinned in pyproject.toml.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    labels: ["dependencies"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: ["dependencies"]
+    groups:
+      actions:
+        patterns: ["*"]
