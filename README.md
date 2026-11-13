@@ -1,221 +1,404 @@
-# drums-sdk
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Drums-Labs/drums-python-sdk/main/docs/assets/drums-symbol-light.svg">
+    <img src="https://raw.githubusercontent.com/Drums-Labs/drums-python-sdk/main/docs/assets/drums-symbol.svg" alt="Drums" width="88">
+  </picture>
+</p>
 
-Python SDK for [Drums](https://drums.run): isolated desktop environments for computer-use agents and RL.
-Create a desktop, act in it, take screenshots, fork it into copies of the same state, and score it with a task's
-checker. Standard library only; Python 3.9 or later.
+<h1 align="center">drums-python-sdk</h1>
 
-Full documentation: **[console.drums.run/docs](https://console.drums.run/docs)**
+<p align="center">
+  Python SDK and MCP server for <a href="https://drums.run">Drums</a>: create, act on, fork, reset and verify isolated desktops for computer-use agents.
+</p>
 
-## Five-minute start
+<p align="center">
+  <a href="https://pypi.org/project/drums-sdk/"><img src="https://img.shields.io/pypi/v/drums-sdk" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/drums-sdk/"><img src="https://img.shields.io/pypi/pyversions/drums-sdk" alt="Python versions"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Drums-Labs/drums-python-sdk" alt="License"></a>
+  <a href="https://github.com/Drums-Labs/drums-python-sdk/actions/workflows/ci.yml"><img src="https://github.com/Drums-Labs/drums-python-sdk/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/Drums-Labs/drums-python-sdk/actions/workflows/release.yml"><img src="https://github.com/Drums-Labs/drums-python-sdk/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+  <a href="https://console.drums.run/docs"><img src="https://img.shields.io/badge/docs-console.drums.run-blue" alt="Docs"></a>
+</p>
 
-### 1. Install
+<p align="center">
+  <a href="https://drums.run">Website</a> ·
+  <a href="https://console.drums.run/docs">Docs</a> ·
+  <a href="https://bench.drums.run">Benchmarks</a> ·
+  <a href="https://console.drums.run">Console</a> ·
+  <a href="https://console.drums.run/docs/reference/python-sdk">SDK reference</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
+
+## What it is
+
+Drums runs many isolated desktops on one host by sharing one running operating system and its applications while
+keeping each desktop's mutable state separate. A desktop (a *computer*) can be created from a template in seconds,
+acted on with GUI, shell and file actions, saved, forked into N copies of the same state, reset, and scored with a
+task's checker. Every episode carries a validity verdict, so a score from a broken environment never reaches training.
+
+This repository is the Python client for that runtime and the `drums` command. The package on PyPI is `drums-sdk`;
+the import name is `drums`. It uses only the standard library and supports Python 3.9 and later. It talks to Drums
+Cloud (`https://beta.drums.run/gw`) or to a self-hosted `drumsd` over the same HTTP API.
+
+## Install
 
 ```bash
-python3 -m venv drums-venv
-drums-venv/bin/pip install drums-sdk
+pip install drums-sdk
 ```
 
-The package on PyPI is `drums-sdk`; the import name is `drums`.
+## Quickstart
 
-```python
-import drums
-```
-
-### 2. Point it at your Drums
-
-The SDK reads two environment variables. Your API key comes from **API Keys** in the
-[console](https://console.drums.run); it starts with `drums_sk_` and is shown once.
+Sign in at [console.drums.run](https://console.drums.run), open **API Keys** and create a key. It starts with
+`drums_sk_` and is shown once. Then, in a terminal:
 
 ```bash
-export DRUMS_URL=https://beta.drums.run/gw     # Drums Cloud gateway; or http://127.0.0.1:7070 for a local drumsd
-export DRUMS_TOKEN=drums_sk_...                # your API key
+export DRUMS_URL=https://beta.drums.run/gw
+export DRUMS_TOKEN=drums_sk_...
 ```
 
-The key is sent over HTTPS, or over plain HTTP to loopback only (`localhost`, `127.0.0.0/8`, `::1`). Any other
-`http://` URL raises `drums.InsecureTransport` before a request is made; `drums.connect(url, token,
-allow_insecure_http=True)` or `DRUMS_ALLOW_INSECURE_HTTP=1` opts in.
-
-Check the connection:
+Save this as `quickstart.py` and run it with `python quickstart.py`. It starts a desktop with OSWorld task
+`e0df059f` (rename a folder on the Desktop), saves a screenshot, performs one GUI action and one shell action, runs
+the task's checker and closes the desktop.
 
 ```python
 import drums
 
-client = drums.connect()                 # reads DRUMS_URL and DRUMS_TOKEN
-print(client.health()["version"])
-```
-
-A `401` raises `drums.AuthError`: the key is mistyped, revoked or expired.
-
-### 3. Create a computer, screenshot, act, verify, destroy
-
-Save as `quickstart.py` and run `drums-venv/bin/python quickstart.py`. It starts a desktop with OSWorld task
-`e0df059f` (rename a folder on the Desktop), waits until every gate of the episode has passed, saves a screenshot,
-performs the task with one action, runs the task's checker and closes the desktop.
-
-```python
-import drums
-
-with drums.connect() as client:                            # closes every desktop it created when the block ends
-    with client.create(task="e0df059f", ttl=900) as env:  # OSWorld task id; ttl: lifetime in seconds
-        env.wait_valid()                                   # every gate of this episode passed
-        obs = env.observe()                                # PNG screenshot plus metadata
-        open("screen.png", "wb").write(obs.png)
-        print("task:", obs.meta["instruction"])
+with drums.connect() as client:                                   # reads DRUMS_URL and DRUMS_TOKEN
+    with client.create(task="e0df059f", ttl=900) as env:         # OSWorld task id; ttl: lifetime in seconds
+        env.wait_valid()                                          # every gate of this episode passed
+        open("screen.png", "wb").write(env.screenshot())          # PNG, 1920x1080
+        env.step("pyautogui.click(960, 540)")                     # GUI: pyautogui code runs inside the desktop
         env.step({"type": "execute", "shell": True,
                   "command": "mv ~/Desktop/todo_list_Jan_1 ~/Desktop/todo_list_Jan_2"})
-        reward = env.verify(strict=False)                  # the task's checker, with the episode's validity
+        reward = env.verify(strict=False)                         # the task's checker plus the episode's validity
         print("score", reward.score, "valid", reward.valid, reward.invalid_reasons)
-    print("computers left:", len(client.envs()))           # 0: the with-block destroyed it
+    print("computers left:", len(client.envs()))                  # 0: the with-block destroyed it
 ```
 
-Expected output (ids and sizes differ):
+Expected output:
 
 ```text
-task: I have a directory named "todo_list_Jan_1". Can you help me change its name into "todo_list_Jan_2"?
 score 1 valid True []
 computers left: 0
 ```
 
-A GUI agent acts with pyautogui instead of a shell command: `env.step("pyautogui.click(960, 540)")`.
-Use a score only when `valid` is `True`; with the default `strict=True`, `verify()` raises `InvalidEpisode`
-for an invalid episode instead of returning a reward.
+Use a score only when `valid` is `True`. With the default `strict=True`, `verify()` raises `drums.InvalidEpisode`
+for an invalid episode instead of returning a reward. A `401` raises `drums.AuthError`: the key is mistyped,
+revoked or expired. The full walkthrough is the [docs quickstart](https://console.drums.run/docs/quickstart).
 
-### 4. Go further
+## How it works
 
-- Fork one desktop into N copies of the same state for group rollouts: `with env.fork(8) as kids: ...`
-  ([guide](https://console.drums.run/docs/guides/group-rollouts-with-fork))
-- Run a policy over many tasks: [Evaluate on OSWorld](https://console.drums.run/docs/guides/evaluate-on-osworld)
-- `drums.aio` is the asyncio variant of the same calls; `drums.hybrid` adds shell, file and app-API tools over one
-  desktop; `drums mcp` serves the whole workflow to an agent over MCP (stdio), see [MCP server](#mcp-server).
-- Every method: [Python SDK reference](https://console.drums.run/docs/reference/python-sdk).
-  Every endpoint: [HTTP API](https://console.drums.run/docs/reference/http-api).
-  If something fails: [Errors](https://console.drums.run/docs/reference/errors).
+```mermaid
+flowchart LR
+    code["Your code<br/>drums, drums.aio, drums mcp"]
+    gw["Drums gateway<br/>beta.drums.run/gw"]
+    d["drumsd on a host<br/>one running OS"]
+    c1["computer"]
+    c2["computer"]
+    k1["child"]
+    k2["child"]
+    code -- "HTTPS + API key" --> gw
+    gw --> d
+    d --> c1
+    d --> c2
+    c1 -. "fork(2)" .-> k1
+    c1 -.-> k2
+```
 
-## How it behaves
+The SDK is a thin client of the gateway's `/v1` routes ([HTTP API](https://console.drums.run/docs/reference/http-api)).
+A `Client` creates computers and lists them; an `Env` is one computer: it steps, screenshots, saves, forks, resets
+and verifies. Names differ between the SDK and the raw API: a computer is a *slot*, a saved state a *checkpoint*,
+save is *capture* and fork is *branch*. They are the same things.
 
-- **Cleanup.** `with drums.connect() as client:` closes every desktop the client created when the block ends, and so
-  do process exit and SIGTERM/SIGHUP. Desktops and saved states also have server-side leases (default: reaped after
+- **Cleanup.** `with drums.connect() as client:` closes every computer the client created when the block ends, and so
+  do process exit and SIGTERM/SIGHUP. Computers and saved states also have server-side leases (default: reaped after
   30 minutes unused), so a crashed trainer does not hold a host.
 - **Validity.** Every episode starts with a gate report (isolation, mounts, network, limits, state hash, processes
-  alive after resume). `Reward.valid` is `True` only when every gate passed and the desktop was never quarantined.
+  alive after resume). `Reward.valid` is `True` only when every gate passed and the computer was never quarantined.
 - **Retries.** GET requests are retried while the server is unreachable (up to `retry_s`, default 60 s). POST and
   DELETE are never retried: after a lost reply the outcome is unknown, so check `client.envs()` before trying again.
-- **Errors.** Every failure is a typed exception under `drums.DrumsError` carrying the server's status, message and
-  body; errors about a desktop carry its record and gate report.
 
-## MCP server
+## Computers
 
-`drums mcp` (the same as `python -m drums.mcp`) is an MCP server on stdio that gives an agent the whole workflow:
-start a computer, act in it, verify against a task checker, fork and reset it, and read run results. It talks to
-the Drums gateway (or a plain drumsd for the desktop tools) at `DRUMS_URL` with `DRUMS_TOKEN`.
+```python
+import drums
 
-```
-drums mcp                        # all tools; desktop tools take computer_id
-drums mcp --env <computer_id>    # desktop tools default to this computer
-drums mcp --create [--task FILE] # create one computer, bind it, close it on exit
-drums mcp --print-config claude|claude-local|cursor|codex
-```
+client = drums.connect()
 
-The same tool list is served remotely by the gateway at `<GATEWAY_URL>/mcp` (MCP Streamable HTTP, authenticated
-with a workspace API key; Drums MCP uses API keys, not OAuth). Replace `<GATEWAY_URL>` with your workspace's gateway
-URL and `drums_sk_...` with a key from the console.
+env = client.create(task="e0df059f", ttl=900)      # from the default template, with an OSWorld task
+env = client.create(image="osworld-ubuntu")        # a template, no task; env.load_task(...) later
+envs = client.create_many(8, task="e0df059f")      # 8 computers created concurrently
 
-Claude Code, remote:
+state = env.save()                                 # a saved state; the computer keeps running
+again = client.create(from_state=state)            # a new computer from that state
+client.delete_state(state)                         # once no computer uses it
 
-```
-claude mcp add --transport http drums <GATEWAY_URL>/mcp --header "Authorization: Bearer drums_sk_..."
+kids = env.fork(4, keep_state=False)               # 4 children from this exact state; the parent keeps running
+print(kids.state, [k.id for k in kids])            # the state the fork made, and the children
+kids.close()                                       # close all children
+
+env.reset()                                        # back to the template or saved state; the task's setup runs again
+env.close()                                        # destroy; a no-op if it is already gone
 ```
 
-Claude Code, local (this package):
+`create` takes `idle_timeout` and `ttl` (seconds) for the computer's lease; `fork` and `save` take the same for
+the children and the state. `fork` captures the state right after an action without a sleep: it waits until the
+process tree is quiescent and raises `drums.NotQuiescent` if it cannot within `quiesce_timeout`. `env.prefork(n)`
+prepares the next fork in the background. Guides: [snapshots and forks](https://console.drums.run/docs/concepts/snapshots-and-forks),
+[group rollouts with fork](https://console.drums.run/docs/guides/group-rollouts-with-fork).
 
-```
-claude mcp add drums -e DRUMS_URL=<GATEWAY_URL> -e DRUMS_TOKEN=drums_sk_... -- drums mcp
+## Actions
+
+`env.step(action)` runs one action inside the desktop as its user (not root) and returns a `StepResult`. The screen
+is 1920x1080 with the origin top left.
+
+```python
+env.step("pyautogui.click(100, 200)")                                 # a str is pyautogui code
+env.step("pyautogui.write('hello'); pyautogui.hotkey('ctrl', 's')")
+env.step({"type": "execute", "shell": True, "command": "ls ~/Desktop"})  # a shell command, waits for it
+env.step({"type": "launch", "shell": True, "command": "gedit &"})       # start a program, do not wait
+env.step({"type": "sleep", "seconds": 2})
+
+r = env.step("pyautogui.click(960, 540)", screenshot=True)            # the screenshot after the action
+r.observation.png                                                     # PNG bytes
+r = env.step({"type": "execute", "command": "test -f ~/x", "shell": True}, check=False)
+r.result["returncode"]                                                # 1 here; check=True would raise ActionFailed
 ```
 
-Cursor (`~/.cursor/mcp.json` or `.cursor/mcp.json`):
+An action that ran and exited non-zero raises `drums.ActionFailed` (with `returncode`, `output`, `error`);
+`check=False` returns the result instead. `env.observe()` returns an `Observation` (PNG plus task, episode and
+verdict metadata). `drums.hybrid.HybridTools(env)` adds `shell`, `read_file`, `write_file`, `list_dir`,
+`office_convert`, `spreadsheet_read`, `browser_tabs` and `browser_open` over the same computer, with `TOOLS` as
+their JSON schema. Reference: [actions](https://console.drums.run/docs/concepts/computers-and-templates#actions).
+
+## Verify and the `trusted` flag
+
+```python
+reward = env.verify(strict=False)
+reward.score            # the checker's score (1 or 0 for OSWorld tasks), None if the checker did not run
+reward.valid            # True only when every gate of the episode passed and the computer was never quarantined
+reward.invalid_reasons  # why not, in words (empty when valid)
+reward.trusted          # True, False or None (see below)
+reward.audit_flags      # e.g. ["scope"], ["checker_timeout"]
+```
+
+`valid` is about the environment; `trusted` is about the reward. After the checker runs, drumsd audits the result
+(a recheck, a redundant checker where one exists, a scope check that flags reward hacking, checker timeout or crash).
+`trusted` is `True` only for a valid episode with a score and no audit flag. It is `False` when a flag was raised and
+`None` when the server sent no audit (an older runtime), never `True` by default. Train on `score` when `valid` is
+`True`; prefer `trusted` when it is available.
+
+With `strict=True` (the default), `verify()` raises `drums.InvalidEpisode` for an invalid episode and
+`drums.CheckerError` when the checker failed; both carry the `Reward`. Tasks and checkers:
+[tasks and verifiers](https://console.drums.run/docs/concepts/tasks-and-verifiers).
+
+## Runs
+
+A run is a managed batch on the Drums gateway: a set of tasks played on desktops, every attempt verified and
+recorded, stopped at a spend or time cap. Runs are created in the console (**Runs > New run**); the SDK reads them
+and can submit the same request the wizard's review step shows.
+
+```python
+page = client.runs(kind="scripted_test", status="completed", limit=20)
+for run in page["items"]:
+    print(run["id"], run["status"], run.get("stop_reason"))
+
+run = client.run(page["items"][0]["id"])            # status, counts and events of one run
+new = client.create_run(spec, idempotency_key="nightly-2026-11-13")   # spec: the request the console shows
+```
+
+Runs, evaluations, API keys and the audit log exist on the Drums gateway only; against a plain `drumsd` these
+methods raise `drums.NotFound`. Concepts: [runs and evaluations](https://console.drums.run/docs/concepts/runs-and-evaluations).
+
+## MCP
+
+Drums publishes one MCP server with 34 tools: the workspace (computers, snapshots, tasks, runs, API keys, audit log)
+and the desktop itself (GUI, screenshot, shell, files, verify, fork, reset). Two ways to reach it:
+
+| Transport | Where it runs | Address |
+|---|---|---|
+| Remote (Streamable HTTP) | inside the gateway | `https://beta.drums.run/gw/mcp` |
+| Local (stdio) | `drums mcp` from this package | your machine, talking to `DRUMS_URL` with `DRUMS_TOKEN` |
+
+Both list exactly the same tools with the same schemas (`drums/mcp_tools.json`). Authentication is the workspace
+API key in either case; there is no OAuth flow. `drums mcp --print-config` prints the snippet for each client with
+a placeholder key, never a real one:
+
+```bash
+export DRUMS_URL=https://beta.drums.run/gw
+drums mcp --print-config claude
+```
+
+```text
+claude mcp add --transport http drums https://beta.drums.run/gw/mcp --header "Authorization: Bearer drums_sk_..."
+```
+
+```bash
+drums mcp --print-config cursor      # ~/.cursor/mcp.json or .cursor/mcp.json
+```
 
 ```json
-{"mcpServers": {"drums": {"url": "<GATEWAY_URL>/mcp", "headers": {"Authorization": "Bearer drums_sk_..."}}}}
+{"mcpServers": {"drums": {"url": "https://beta.drums.run/gw/mcp", "headers": {"Authorization": "Bearer drums_sk_..."}}}}
 ```
 
-Codex (`~/.codex/config.toml`):
+```bash
+drums mcp --print-config codex       # ~/.codex/config.toml; Codex starts the local server
+```
 
 ```toml
 [mcp_servers.drums]
 command = "drums"
 args = ["mcp"]
-env = { DRUMS_URL = "<GATEWAY_URL>", DRUMS_TOKEN = "drums_sk_..." }
+env = { DRUMS_URL = "https://beta.drums.run/gw", DRUMS_TOKEN = "drums_sk_..." }
 ```
 
-This repository is also a Claude Code plugin (`.claude-plugin/plugin.json`, `.mcp.json`, and the
-`drums-workflow` skill under `skills/`), which installs the server and a skill that teaches the loop below.
+`drums mcp --print-config claude-local` prints the Claude Code line for the local server. Replace `drums_sk_...`
+with your key. Treat the client's configuration file like a secret.
 
-### Tools
+The local server:
 
-Workspace tools (the gateway's HTTP API; `*` needs the Drums gateway and answers "not available on this server"
-against a plain drumsd):
+```bash
+drums mcp                        # all tools; desktop tools take computer_id
+drums mcp --env COMPUTER_ID      # desktop tools default to this computer
+drums mcp --create               # create one computer, bind it, close it on exit (--task FILE loads a task)
+```
 
-| tool | what it does |
+`drums mcp` is the same as `python -m drums.mcp`. The token comes from `DRUMS_TOKEN`, else the file named by
+`DRUMS_TOKEN_FILE`, else `/etc/drums/token`; it is never printed and never appears in an error message. This
+repository is also a Claude Code plugin (`.claude-plugin/plugin.json`, `.mcp.json`, the `drums-workflow` skill).
+
+Two rules:
+
+- **`confirm: true`.** `destroy_computer`, `delete_snapshot` and `revoke_api_key` (the tools marked `destructive`
+  in `mcp_tools.json`) are refused before any request is sent unless the tool arguments carry `confirm: true`. The
+  caller (the agent) supplies that argument; Drums does not prompt anyone. Whether a person approves the call is the
+  MCP client's job (Claude Code, Cursor and Codex each have tool-approval settings). `reset` discards a computer's
+  desktop state too, but it is not gated.
+- **HTTPS only.** The token travels over HTTPS, or over plain HTTP to loopback only (`localhost`, `127.0.0.0/8`,
+  `::1`, where a local `drumsd` listens). Any other `http://` URL in `--url` or `DRUMS_URL` is refused before a
+  request is sent (`drums.InsecureTransport`; exit 2 from `drums mcp`), with a message naming the host and the
+  opt-ins, never the token. To opt in: `drums mcp --allow-insecure-http`, `DRUMS_ALLOW_INSECURE_HTTP=1`, or
+  `drums.connect(url, token, allow_insecure_http=True)`. Redirects are followed only to the same origin, at most 5
+  hops, with the same check on every hop (`drums.RedirectRefused` otherwise).
+
+Tool list, scopes and examples: [MCP guide](https://console.drums.run/docs/guides/mcp).
+
+## Async client
+
+`drums.aio` offers the same calls as coroutines. Each `AsyncClient` has its own thread pool (default 1024 threads,
+started on demand), so N computers driven with `asyncio.gather` really run N calls at once.
+
+```python
+import asyncio
+
+import drums.aio
+
+
+async def main():
+    async with await drums.aio.connect() as client:
+        envs = await asyncio.gather(*[client.create(task="e0df059f") for _ in range(8)])
+        await asyncio.gather(*[e.step("pyautogui.click(960, 540)") for e in envs])
+        rewards = await asyncio.gather(*[e.verify(strict=False) for e in envs])
+        print([r.score for r in rewards if r.valid])
+
+
+asyncio.run(main())
+```
+
+## Errors
+
+Every failure is a typed exception under `drums.DrumsError` with `status` (the HTTP status, `0` when there was no
+reply), `message` and `body`. Errors about a computer carry its record and gate report.
+
+| Exception | When |
 |---|---|
-| `list_templates` | base desktop images a computer can start from |
-| `list_computers`, `get_computer` | the workspace's computers: state, validity, task |
-| `create_computer` | a new computer from a template or snapshot, optionally with a task |
-| `destroy_computer` | close a computer for good (destructive) |
-| `list_snapshots`, `create_snapshot`, `delete_snapshot` | saved desktop states (delete is destructive) |
-| `list_tasks`, `get_task` | the verified computer-use tasks on the host |
-| `list_runs`, `create_run`, `get_run` * | runs: submit a RunSpec, read status, counts and events |
-| `list_evaluations`, `create_evaluation`, `get_evaluation` * | runs with kind `evaluation` |
-| `list_api_keys`, `create_api_key`, `revoke_api_key` * | API keys (metadata only; revoke is destructive) |
-| `read_audit_log` * | who did what, newest first; MCP calls appear as `mcp.<tool>` |
+| `AuthError` | 401: missing, wrong, revoked or expired key |
+| `InsecureTransport` | refused before any request: a token would travel over plain HTTP off loopback |
+| `RedirectRefused` | refused: a redirect to another origin, or more than 5 hops |
+| `BadRequest` | 400 or 422: bad task JSON, bad id, `n` out of range |
+| `TaskUnsupported` | 422: the task needs the agent itself to act as root; nothing was started |
+| `NotFound` | 404: no such computer, template, state or task |
+| `EnvGone` | 410: the computer was destroyed (closed, or reaped by its lease); a subclass of `NotFound` |
+| `Conflict` | 409: the computer's state does not allow this operation |
+| `NotQuiescent` | 409: fork or save found no safe moment to capture; nothing was captured |
+| `CheckpointStale` | 409: the template's checkpoint predates this runtime; the installer must run again |
+| `Overloaded` | 429: the host is near its memory limit; nothing was started, try again later |
+| `DaemonUnavailable` | the server did not answer; after a POST, call `env.refresh()` |
+| `GuestError` | 502: the desktop's guest did not answer or refused the action |
+| `ActionFailed` | the action ran and exited non-zero (`returncode`, `output`, `error`) |
+| `EnvFailed` | a create, reset or fork child did not come up ready (`record`, `gates`, `cause`) |
+| `RestoreFailed`, `GateFailed`, `TaskSetupFailed` | subclasses of `EnvFailed`: restore failed, a gate failed (quarantined), the task's setup failed |
+| `ForkError` | some children failed (`ok`, `failed`, `state`) |
+| `BatchError` | some of `create_many` failed (`ok`, `failed`) |
+| `InvalidEpisode` | `verify()` on an invalid episode (`reward` attached); do not train on it |
+| `CheckerError` | the checker raised or could not run (`reward` attached) |
 
-Desktop tools (each takes `computer_id`):
+Every gateway error reply carries a `request_id` (`gw_...`); include it when you report a problem. Full table with
+causes and fixes: [errors](https://console.drums.run/docs/reference/errors).
 
-| tool | what it does |
-|---|---|
-| `gui` | pyautogui code in the desktop (1920x1080) |
-| `screenshot` | a PNG of the desktop (image content) |
-| `shell` | a bash command as the desktop user (no root, no internet) |
-| `read_file`, `write_file`, `list_dir` | the desktop's files (`~` is `/home/user`) |
-| `office_convert`, `spreadsheet_read` | LibreOffice conversions and sheet reads |
-| `browser_tabs`, `browser_open` | Chrome tabs through its DevTools port (1337) |
-| `load_task` | load a task into a running computer (setup runs, a new episode starts) |
-| `verify` | score the desktop with the task's checker: score, valid, trusted, audit flags |
-| `fork` | n children that continue from this exact state; the parent keeps running |
-| `reset` | back to the clean template state; the task's setup runs again |
+## Configuration
 
-The canonical list with every input schema is `drums/mcp_tools.json`; `tools/list` returns exactly it, in order.
+| Variable | Read by | Meaning |
+|---|---|---|
+| `DRUMS_URL` | SDK, `drums mcp` | the gateway or `drumsd` URL. Default `http://127.0.0.1:7070` |
+| `DRUMS_TOKEN` | SDK, `drums mcp` | the API key (`drums_sk_...`); sent as `Authorization: Bearer` |
+| `DRUMS_TOKEN_FILE` | `drums mcp` | a file holding the token, read when `DRUMS_TOKEN` is unset; then `/etc/drums/token` |
+| `DRUMS_ALLOW_INSECURE_HTTP` | SDK, `drums mcp` | `1` sends the token over plain HTTP to a host that is not loopback |
+| `DRUMSD_URL` | SDK | older name for `DRUMS_URL`, read when `DRUMS_URL` is unset |
 
-### Safety
-
-- Gated tools need `confirm: true` from the caller. `destroy_computer`, `delete_snapshot` and `revoke_api_key`
-  (the tools marked `destructive` in `mcp_tools.json`) are refused before any request is sent unless the tool
-  arguments carry `confirm: true`. The caller (the agent) supplies that argument; Drums does not prompt anyone.
-  Whether a person approves the call is the MCP client's job (Claude Code, Cursor and Codex each have their own
-  tool-approval settings): there is no confirmation step inside Drums, and `confirm: true` from the caller is the
-  only thing the server checks. `reset` also discards a computer's desktop state, but it is not gated.
-- The token only travels over HTTPS, or over plain HTTP to loopback (`localhost`, `127.0.0.0/8`, `::1`, where a
-  local drumsd listens). With a token set, any other `http://` URL in `--url` or `DRUMS_URL` is refused before a
-  request is sent, with a message naming the host and the opt-ins (never the token). To send the token over plain
-  HTTP anyway, opt in: `drums mcp --allow-insecure-http`, `DRUMS_ALLOW_INSECURE_HTTP=1`, or
-  `drums.connect(url, token, allow_insecure_http=True)` / `drums.Client(..., allow_insecure_http=True)` in the SDK
-  (the `Client` applies the same rule, so SDK scripts are covered too; the error is `drums.InsecureTransport`).
-- Redirects are followed only to the same origin (scheme, host, port), at most 5 hops, with the same transport
-  check on each hop; any other redirect raises `drums.RedirectRefused` before it is followed, so the token is
-  never re-sent to another host or over plain HTTP because a server said `Location`.
-- Arguments are checked against the tool's schema before anything is sent; a violation is a tool error naming the
-  field. A tool failure is always a tool result with `isError`, never a protocol error.
-- `--print-config` prints placeholders (`<GATEWAY_URL>` when no URL is known, always `drums_sk_...`), never a key.
-- The token comes from `DRUMS_TOKEN`, else the file `DRUMS_TOKEN_FILE`, else `/etc/drums/token`; it is never
-  printed or written by the server, and never appears in an error message.
-- Keys are workspace-scoped on the gateway: a key never sees another workspace's computers.
-- `create_api_key` returns the plaintext key once; nothing stores it.
+`drums.connect(url, token, timeout=900, retry_s=60, check=True, close_on_exit=True, handle_signals=True,
+allow_insecure_http=None)` takes the same values as arguments. In CI, store the key in the secret store and expose
+it only as `DRUMS_TOKEN` to the job that needs it ([API keys guide](https://console.drums.run/docs/guides/api-keys)).
 
 ## Development
 
 ```bash
 git clone https://github.com/Drums-Labs/drums-python-sdk.git
 cd drums-python-sdk
-python3 -m unittest discover -s tests -v     # runs against a fake daemon; no network
+python3 -m unittest discover -s tests -v
 ```
 
-See [CHANGELOG.md](CHANGELOG.md) for what changed in each version and [RELEASE.md](RELEASE.md) for how a release is cut.
+The tests run against a fake gateway on `127.0.0.1` and need no account or network. CI runs them on Python 3.9,
+3.10, 3.11, 3.12 and 3.13 on every push and pull request, then builds the package and runs `twine check --strict`;
+the release workflow installs the built wheel into a clean venv on the same five versions and runs the suite against
+it. To do the same locally:
+
+```bash
+python3 -m pip install --upgrade build twine
+python3 -m build
+python3 -m twine check --strict dist/*
+```
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+
+## Versioning and changelog
+
+Versions follow `MAJOR.MINOR.PATCH`. While the major version is 0, a minor release may change an interface and says
+so in [CHANGELOG.md](CHANGELOG.md), which lists every release with the runtime version it was built against. The
+package version is `drums.__version__`; `drums version` prints it. Releases are tagged `vX.Y.Z` and published to
+PyPI by the [release workflow](.github/workflows/release.yml) with Trusted Publishing; see [RELEASE.md](RELEASE.md).
+
+## Security
+
+Report a vulnerability privately through
+[GitHub's private reporting form](https://github.com/Drums-Labs/drums-python-sdk/security/advisories/new) or to
+security@drums.run, not in a public issue. [SECURITY.md](SECURITY.md) has the supported versions, the response time
+and the known limitations of the runtime the SDK talks to.
+
+## Contributing
+
+Bug reports and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers the setup, the tests, the
+sign-off and what a pull request needs. The project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+
+## License
+
+[Apache License 2.0](LICENSE).
+
+## Status
+
+Beta. The `Client` and `Env` methods used in this README, the error classes and the environment variables are
+stable within 0.x: a change to any of them is listed in the changelog with a migration note. Stable: create, step,
+observe, screenshot, save, fork, reset, verify, close; the MCP tool list and its `confirm` rule; the transport
+rules. Not yet stable: `Client.runs`/`create_run` (the gateway's run endpoints are new), `HybridTools` (the browser
+tools need Chrome started with a DevTools port), and `Reward.trusted` on runtimes that send no audit (it is `None`
+there).
