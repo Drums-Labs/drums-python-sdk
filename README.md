@@ -17,15 +17,15 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Drums-Labs/drums-python-sdk" alt="License"></a>
   <a href="https://github.com/Drums-Labs/drums-python-sdk/actions/workflows/ci.yml"><img src="https://github.com/Drums-Labs/drums-python-sdk/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="https://github.com/Drums-Labs/drums-python-sdk/actions/workflows/release.yml"><img src="https://github.com/Drums-Labs/drums-python-sdk/actions/workflows/release.yml/badge.svg" alt="Release"></a>
-  <a href="https://console.drums.run/docs"><img src="https://img.shields.io/badge/docs-console.drums.run-blue" alt="Docs"></a>
+  <a href="https://docs.drums.run"><img src="https://img.shields.io/badge/docs-docs.drums.run-blue" alt="Docs"></a>
 </p>
 
 <p align="center">
   <a href="https://drums.run">Website</a> ·
-  <a href="https://console.drums.run/docs">Docs</a> ·
+  <a href="https://docs.drums.run">Docs</a> ·
   <a href="https://bench.drums.run">Benchmarks</a> ·
   <a href="https://console.drums.run">Console</a> ·
-  <a href="https://console.drums.run/docs/reference/python-sdk">SDK reference</a> ·
+  <a href="https://docs.drums.run/reference/python-sdk">SDK reference</a> ·
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
@@ -84,7 +84,7 @@ computers left: 0
 
 Use a score only when `valid` is `True`. With the default `strict=True`, `verify()` raises `drums.InvalidEpisode`
 for an invalid episode instead of returning a reward. A `401` raises `drums.AuthError`: the key is mistyped,
-revoked or expired. The full walkthrough is the [docs quickstart](https://console.drums.run/docs/quickstart).
+revoked or expired. The full walkthrough is the [docs quickstart](https://docs.drums.run/quickstart).
 
 ## How it works
 
@@ -105,7 +105,7 @@ flowchart LR
     c1 -.-> k2
 ```
 
-The SDK is a thin client of the gateway's `/v1` routes ([HTTP API](https://console.drums.run/docs/reference/http-api)).
+The SDK is a thin client of the gateway's `/v1` routes ([HTTP API](https://docs.drums.run/reference/http-api)).
 A `Client` creates computers and lists them; an `Env` is one computer: it steps, screenshots, saves, forks, resets
 and verifies. Names differ between the SDK and the raw API: a computer is a *slot*, a saved state a *checkpoint*,
 save is *capture* and fork is *branch*. They are the same things.
@@ -144,8 +144,8 @@ env.close()                                        # destroy; a no-op if it is a
 `create` takes `idle_timeout` and `ttl` (seconds) for the computer's lease; `fork` and `save` take the same for
 the children and the state. `fork` captures the state right after an action without a sleep: it waits until the
 process tree is quiescent and raises `drums.NotQuiescent` if it cannot within `quiesce_timeout`. `env.prefork(n)`
-prepares the next fork in the background. Guides: [snapshots and forks](https://console.drums.run/docs/concepts/snapshots-and-forks),
-[group rollouts with fork](https://console.drums.run/docs/guides/group-rollouts-with-fork).
+prepares the next fork in the background. Guides: [snapshots and forks](https://docs.drums.run/concepts/snapshots-and-forks),
+[group rollouts with fork](https://docs.drums.run/guides/group-rollouts-with-fork).
 
 ## Actions
 
@@ -169,7 +169,7 @@ An action that ran and exited non-zero raises `drums.ActionFailed` (with `return
 `check=False` returns the result instead. `env.observe()` returns an `Observation` (PNG plus task, episode and
 verdict metadata). `drums.hybrid.HybridTools(env)` adds `shell`, `read_file`, `write_file`, `list_dir`,
 `office_convert`, `spreadsheet_read`, `browser_tabs` and `browser_open` over the same computer, with `TOOLS` as
-their JSON schema. Reference: [actions](https://console.drums.run/docs/concepts/computers-and-templates#actions).
+their JSON schema. Reference: [actions](https://docs.drums.run/concepts/computers-and-templates#actions).
 
 ## Verify and the `trusted` flag
 
@@ -190,7 +190,7 @@ reward.audit_flags      # e.g. ["scope"], ["checker_timeout"]
 
 With `strict=True` (the default), `verify()` raises `drums.InvalidEpisode` for an invalid episode and
 `drums.CheckerError` when the checker failed; both carry the `Reward`. Tasks and checkers:
-[tasks and verifiers](https://console.drums.run/docs/concepts/tasks-and-verifiers).
+[tasks and verifiers](https://docs.drums.run/concepts/tasks-and-verifiers).
 
 ## Runs
 
@@ -208,7 +208,7 @@ new = client.create_run(spec, idempotency_key="nightly-2026-11-13")   # spec: th
 ```
 
 Runs, evaluations, API keys and the audit log exist on the Drums gateway only; against a plain `drumsd` these
-methods raise `drums.NotFound`. Concepts: [runs and evaluations](https://console.drums.run/docs/concepts/runs-and-evaluations).
+methods raise `drums.NotFound`. Concepts: [runs and evaluations](https://docs.drums.run/concepts/runs-and-evaluations).
 
 ## MCP
 
@@ -281,7 +281,7 @@ Two rules:
   `drums.connect(url, token, allow_insecure_http=True)`. Redirects are followed only to the same origin, at most 5
   hops, with the same check on every hop (`drums.RedirectRefused` otherwise).
 
-Tool list, scopes and examples: [MCP guide](https://console.drums.run/docs/guides/mcp).
+Tool list, scopes and examples: [MCP guide](https://docs.drums.run/guides/mcp).
 
 ## Async client
 
@@ -334,7 +334,7 @@ reply), `message` and `body`. Errors about a computer carry its record and gate 
 | `CheckerError` | the checker raised or could not run (`reward` attached) |
 
 Every gateway error reply carries a `request_id` (`gw_...`); include it when you report a problem. Full table with
-causes and fixes: [errors](https://console.drums.run/docs/reference/errors).
+causes and fixes: [errors](https://docs.drums.run/reference/errors).
 
 ## Configuration
 
@@ -348,7 +348,7 @@ causes and fixes: [errors](https://console.drums.run/docs/reference/errors).
 
 `drums.connect(url, token, timeout=900, retry_s=60, check=True, close_on_exit=True, handle_signals=True,
 allow_insecure_http=None)` takes the same values as arguments. In CI, store the key in the secret store and expose
-it only as `DRUMS_TOKEN` to the job that needs it ([API keys guide](https://console.drums.run/docs/guides/api-keys)).
+it only as `DRUMS_TOKEN` to the job that needs it ([API keys guide](https://docs.drums.run/guides/api-keys)).
 
 ## Development
 

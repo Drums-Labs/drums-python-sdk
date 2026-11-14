@@ -635,7 +635,7 @@ class Env:
         """pyautogui code (str) or an action dict: {"type": "pyautogui", "code"}, {"type": "execute", "command", "shell"},
         {"type": "launch", "command", "shell"}, {"type": "sleep", "seconds"}. Screen 1920x1080, origin top left, pixels.
         pyautogui and execute run inside the env as its desktop user `user` (not root), with OSWorld's prefix
-        (`import pyautogui, time`). See https://console.drums.run/docs/concepts/computers-and-templates#actions.
+        (`import pyautogui, time`). See https://docs.drums.run/concepts/computers-and-templates#actions.
         check=True (default): an action that ran and exited non-zero raises ActionFailed with its exit status, output
         and error; check=False returns the result as is. A guest that does not answer or times out (120 s) raises
         GuestError either way."""

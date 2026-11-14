@@ -56,7 +56,7 @@ do not recognise, and create a replacement. Rewriting git history does not undo 
 ## Known limitations of the runtime the SDK talks to
 
 These describe Drums Cloud and `drumsd` as published at
-[Isolation and worker pools](https://console.drums.run/docs/concepts/isolation-and-worker-pools); they are not
+[Isolation and worker pools](https://docs.drums.run/concepts/isolation-and-worker-pools); they are not
 properties of this package, but anyone using it should know them.
 
 - **The isolation boundary between customers is the host.** A worker host is bound to one workspace; desktops of
@@ -80,4 +80,4 @@ properties of this package, but anyone using it should know them.
   provisioned by the operator.
 
 Rate limits, quotas and what the gateway checks on every call are in the
-[authentication reference](https://console.drums.run/docs/reference/authentication).
+[authentication reference](https://docs.drums.run/reference/authentication).

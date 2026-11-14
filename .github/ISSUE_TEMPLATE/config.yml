@@ -4,7 +4,7 @@ contact_links:
     url: https://github.com/Drums-Labs/drums-python-sdk/security/advisories/new
     about: Report a vulnerability privately. Please do not open a public issue for it.
   - name: Documentation
-    url: https://console.drums.run/docs
+    url: https://docs.drums.run
     about: Quickstart, concepts, the SDK reference and the HTTP API.
   - name: Account, billing or a problem with your workspace
     url: https://console.drums.run

@@ -35,8 +35,8 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://drums.run"
-Documentation = "https://console.drums.run/docs"
-"SDK reference" = "https://console.drums.run/docs/reference/python-sdk"
+Documentation = "https://docs.drums.run"
+"SDK reference" = "https://docs.drums.run/reference/python-sdk"
 Repository = "https://github.com/Drums-Labs/drums-python-sdk"
 Changelog = "https://github.com/Drums-Labs/drums-python-sdk/blob/main/CHANGELOG.md"
 Issues = "https://github.com/Drums-Labs/drums-python-sdk/issues"
