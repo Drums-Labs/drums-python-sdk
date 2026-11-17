@@ -345,13 +345,23 @@ class ClientTests(unittest.TestCase):
         took = asyncio.run(main())
         self.assertLess(took, 3 * delay, f"{n} concurrent steps of {delay} s took {took:.2f} s")
 
-    def test_overloaded_is_typed_and_not_retried(self):
+    def test_overloaded_is_typed_and_not_retried_with_retries_off(self):
+        c = drums.connect(self.url, TOKEN, retry_s=1, close_on_exit=False, retry=drums.RetryPolicy(max_wait_s=0))
         n = len([c for c in Fake.calls if c[1] == "/v1/slots"])
         with self.assertRaises(drums.Overloaded) as cm:
-            self.c.create(image="full")
+            c.create(image="full")
         self.assertEqual(cm.exception.reason, "memory")
         self.assertEqual(cm.exception.admission["floor_mib"], 40000)
-        self.assertEqual(len([c for c in Fake.calls if c[1] == "/v1/slots"]), n + 1)     # a POST is never retried
+        self.assertEqual(len([c for c in Fake.calls if c[1] == "/v1/slots"]), n + 1)     # RetryPolicy(max_wait_s=0): no retry
+
+    def test_overloaded_is_retried_within_the_budget_then_raised(self):
+        c = drums.connect(self.url, TOKEN, retry_s=1, close_on_exit=False, retry=drums.RetryPolicy(max_wait_s=0.3, base_s=0.05, jitter=0))
+        n = len([c for c in Fake.calls if c[1] == "/v1/slots"])
+        with self.assertRaises(drums.Overloaded) as cm:
+            c.create(image="full")
+        tries = len([c for c in Fake.calls if c[1] == "/v1/slots"]) - n
+        self.assertGreater(tries, 1)                                        # a 429 started nothing: retried
+        self.assertEqual(cm.exception.retries, tries - 1)
 
     def test_a_failed_action_raises_with_its_exit_status(self):
         e = self.c.create()

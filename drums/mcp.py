@@ -30,7 +30,7 @@ import re
 import sys
 import urllib.parse
 
-from . import Client, Env, __version__, connect
+from . import Client, Env, RetryPolicy, __version__, connect
 from .errors import DrumsError, InsecureTransport, NotFound
 from .hybrid import HybridTools
 
@@ -463,10 +463,12 @@ def run(a) -> int:
     if a.env and a.create:
         sys.stderr.write("drums mcp: --env and --create exclude each other\n")
         return 2
-    # retry_s: an unreachable server fails a tool call within seconds (a trainer's 60 s is too long for a chat turn)
+    # retry_s / retry: an unreachable or rate-limited server fails a tool call within seconds (a trainer's 60 s is too
+    # long for a chat turn); $DRUMS_RETRY_MAX_WAIT_S still wins when set
+    retry = RetryPolicy.from_env() if os.environ.get("DRUMS_RETRY_MAX_WAIT_S", "").strip() else RetryPolicy(max_wait_s=10.0)
     try:
         c = connect(a.url or os.environ.get("DRUMS_URL"), read_token(), check=False, close_on_exit=bool(a.create), retry_s=5.0,
-                    allow_insecure_http=True if a.allow_insecure_http else None)
+                    allow_insecure_http=True if a.allow_insecure_http else None, retry=retry)
     except InsecureTransport as e:
         sys.stderr.write(f"drums mcp: {e}\n")       # names the host and the opt-ins, never the token
         return 2
