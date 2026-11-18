@@ -115,8 +115,18 @@ save is *capture* and fork is *branch*. They are the same things.
   30 minutes unused), so a crashed trainer does not hold a host.
 - **Validity.** Every episode starts with a gate report (isolation, mounts, network, limits, state hash, processes
   alive after resume). `Reward.valid` is `True` only when every gate passed and the computer was never quarantined.
-- **Retries.** GET requests are retried while the server is unreachable (up to `retry_s`, default 60 s). POST and
-  DELETE are never retried: after a lost reply the outcome is unknown, so check `client.envs()` before trying again.
+- **Retries.** GET requests are retried while the server is unreachable (up to `retry_s`, default 60 s). After a
+  lost reply to a POST or DELETE the outcome is unknown, so those are not retried; check `client.envs()` before
+  trying again. A 429 (the per-key rate limit, or no capacity right now) means nothing was started, so every call
+  (step, screenshot, verify, create, fork, ...) is retried, waiting at least the reply's `Retry-After` with jittered
+  backoff, for at most 60 s of waiting per call: `drums.RetryPolicy(max_wait_s=..., max_attempts=..., base_s=...,
+  cap_s=..., jitter=...)`, passed as `connect(..., retry=...)`. `RetryPolicy(max_wait_s=0)` or
+  `DRUMS_RETRY_MAX_WAIT_S=0` turns it off. `drums mcp` waits at most 10 s, so a chat turn does not hang.
+- **Certificates.** python.org's macOS Python has no root certificates until you run `Install Certificates.command`
+  (in `/Applications/Python 3.x/`), so the first HTTPS call fails with `CERTIFICATE_VERIFY_FAILED` even though
+  `curl` works. When the system store cannot verify the server and `certifi` is installed (`pip install certifi`),
+  the client retries once with certifi's CA bundle and prints one line saying so; without certifi it raises
+  `CertificateError` with the same fix.
 
 ## Computers
 
@@ -322,8 +332,9 @@ reply), `message` and `body`. Errors about a computer carry its record and gate 
 | `Conflict` | 409: the computer's state does not allow this operation |
 | `NotQuiescent` | 409: fork or save found no safe moment to capture; nothing was captured |
 | `CheckpointStale` | 409: the template's checkpoint predates this runtime; the installer must run again |
-| `Overloaded` | 429: the host is near its memory limit; nothing was started, try again later |
+| `Overloaded` | 429: rate limited, host full or near its memory limit; nothing was started. Raised after the retries ran out (`retry_after`, `retries`) |
 | `DaemonUnavailable` | the server did not answer; after a POST, call `env.refresh()` |
+| `CertificateError` | the server's TLS certificate could not be verified (`hint` says how to fix it); a subclass of `DaemonUnavailable` |
 | `GuestError` | 502: the desktop's guest did not answer or refused the action |
 | `ActionFailed` | the action ran and exited non-zero (`returncode`, `output`, `error`) |
 | `EnvFailed` | a create, reset or fork child did not come up ready (`record`, `gates`, `cause`) |
@@ -344,10 +355,11 @@ causes and fixes: [errors](https://docs.drums.run/reference/errors).
 | `DRUMS_TOKEN` | SDK, `drums mcp` | the API key (`drums_sk_...`); sent as `Authorization: Bearer` |
 | `DRUMS_TOKEN_FILE` | `drums mcp` | a file holding the token, read when `DRUMS_TOKEN` is unset; then `/etc/drums/token` |
 | `DRUMS_ALLOW_INSECURE_HTTP` | SDK, `drums mcp` | `1` sends the token over plain HTTP to a host that is not loopback |
+| `DRUMS_RETRY_MAX_WAIT_S` | SDK, `drums mcp` | seconds a call may spend waiting out 429 replies (default 60; `drums mcp` 10); `0` turns the retries off |
 | `DRUMSD_URL` | SDK | older name for `DRUMS_URL`, read when `DRUMS_URL` is unset |
 
 `drums.connect(url, token, timeout=900, retry_s=60, check=True, close_on_exit=True, handle_signals=True,
-allow_insecure_http=None)` takes the same values as arguments. In CI, store the key in the secret store and expose
+allow_insecure_http=None, retry=None)` takes the same values as arguments. In CI, store the key in the secret store and expose
 it only as `DRUMS_TOKEN` to the job that needs it ([API keys guide](https://docs.drums.run/guides/api-keys)).
 
 ## Development
