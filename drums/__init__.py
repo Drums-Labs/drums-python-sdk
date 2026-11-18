@@ -44,10 +44,10 @@ import signal
 import threading
 import warnings
 
-from . import runs as _runs
 from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerError, CheckpointStale, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
                      EnvGone, ForkError, GateFailed, GuestError, InsecureTransport, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RedirectRefused, RestoreFailed, TaskSetupFailed,
                      TaskUnsupported)
+from . import runs as _runs
 from .runs import Run, RunNotSupported
 
 __version__ = "0.3.0"
