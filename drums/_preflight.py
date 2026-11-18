@@ -12,8 +12,10 @@ What is checked, and where the numbers come from (only reads; nothing is created
 
     gateway        GET /v1/health answers, how fast (control-plane health; the gateway reads the database to answer)
     console        the console URL answers (sign-in page)
-    auth           the key is accepted, not revoked, and does not expire during the run (GET /v1/api-keys, by prefix)
-    scopes         computers:read + computers:write (required); runs:write (run object), usage:read (cost) wanted
+    auth           the key is accepted, not revoked, and does not expire during the run (GET /v1/api-keys, by prefix);
+                   on a gateway in desktop-token mode (GET /auth says token or both), the key is exchanged at the
+                   console first, so a console that cannot issue a token shows up here, not as a gateway failure
+    scopes         computers:read + computers:write (required; computers:write also opens runs); usage:read wanted
     host capacity  free desktops on the bound host >= N (GET /v1/health `capacity`), and the host takes creates
                    (drumsd ok, no stale image checkpoint)
     rate limit     the per-key limit vs N x REQUESTS_PER_DESKTOP_S, and its burst vs N x BURST_PER_DESKTOP
@@ -21,9 +23,10 @@ What is checked, and where the numbers come from (only reads; nothing is created
     spend cap      spent this period + N x H x the desktop-hour price <= the cap
     task set       (with --task-set) registered for this workspace, and validated (oracle accepted, none rejected)
 
-The rate limit, quota, spend cap and price come from `GET /v1/limits`, a read-only summary the gateway does not serve
-yet (expected shape in `_limits_view`). Until it does, those rows say "not checked" and why, and `--desktop-hour-usd`
-supplies the price for the projection. A row that could not be checked never fails the preflight; `--strict` does.
+The rate limit, quota, spend cap and price come from `GET /v1/limits` (scope usage:read; Drums-Labs/drums#49, shape
+in `_limits_view`). On a gateway that does not serve it yet, those rows say "not checked" and why, and
+`--desktop-hour-usd` supplies the price for the projection. A row that could not be checked never fails the
+preflight; `--strict` does.
 """
 from __future__ import annotations
 
@@ -47,8 +50,8 @@ BURST_PER_DESKTOP = 1.0
 #: The gateway's default per-key limit (RATE_LIMIT_PER_S / RATE_LIMIT_BURST unset): a pilot setting.
 DEFAULT_RATE_PER_S, DEFAULT_RATE_BURST = 20, 60
 REQUIRED_SCOPES = ("computers:read", "computers:write")
-WANTED_SCOPES = {"runs:write": "the run object (client.run) cannot record the run",
-                 "usage:read": "usage and cost reads are refused"}
+#: runs:write is not wanted: the gateway opens trainer runs with computers:write too (Drums-Labs/drums#41)
+WANTED_SCOPES = {"usage:read": "usage and cost reads (and GET /v1/limits, so the quota and spend rows) are refused"}
 #: /v1/health slower than this is a warning, ten times slower a failure (the 2026-11-16 outage answered in 10 to 90 s)
 HEALTH_SLOW_S = 2.0
 DEFAULT_CONSOLE_URL = "https://console.drums.run"
@@ -144,12 +147,17 @@ def _num(d, *keys):
 
 
 def _limits_view(doc) -> dict:
-    """The fields preflight reads from `GET /v1/limits` (a proposal; any of them may be missing):
+    """The fields preflight reads from `GET /v1/limits` (served by Drums-Labs/drums#49; any of them may be missing,
+    and the gateway's extra fields are ignored):
 
-        {"workspace": {"max_live_computers", "live_computers", "max_spend_usd", "spent_usd", "period_end"},
+        {"workspace": {"max_live_computers", "live_computers", "max_spend_usd", "spent_usd", "period_end",
+                       "rate_limit_profile"},
          "rate_limit": {"per_s", "burst"},
          "price": {"desktop_hour_usd"},
-         "host": {"id", "status", "max_desktops", "live"}}
+         "host": {"id", "status", "max_desktops", "live", "free", "admission"}}
+
+    `host.admission` is open, busy (the create gate is full right now), full, down (drumsd did not answer), or the
+    host status when it is not active. `host.live` / `free` may lag a burst of creates by up to 30 s.
     """
     d = doc if isinstance(doc, dict) else {}
     ws = d.get("workspace") if isinstance(d.get("workspace"), dict) else d
@@ -168,6 +176,11 @@ def _limits_view(doc) -> dict:
         "desktop_hour_usd": _num(price, "desktop_hour_usd", "usd_per_desktop_hour"),
         "host_id": host.get("id"),
         "host_status": host.get("status"),
+        "host_admission": host.get("admission"),
+        "host_max": _num(host, "max_desktops"),
+        "host_live": _num(host, "live"),
+        "host_free": _num(host, "free"),
+        "rate_profile": ws.get("rate_limit_profile") if isinstance(ws.get("rate_limit_profile"), str) else None,
     }
 
 
@@ -228,18 +241,43 @@ def preflight(desktops: int, hours: float, *, model_gpus=None, task_set: str | N
     if not isinstance(hours, (int, float)) or hours <= 0:
         raise ValueError("hours must be a positive number")
     gpus = parse_model_gpus(model_gpus)
-    console = (console_url or os.environ.get("DRUMS_CONSOLE_URL") or DEFAULT_CONSOLE_URL).rstrip("/")
-    links = _Links(console, workspace or os.environ.get("DRUMS_WORKSPACE"))
     if client is None:
         client = Client(url or os.environ.get("DRUMS_URL") or "", token if token is not None else os.environ.get("DRUMS_TOKEN"),
                         timeout=timeout, retry_s=3.0)
     tok = client.token or ""
+    # desktop-token mode: GET <url>/auth, then the key goes to the console's token URL. Do it first, so a console that
+    # cannot issue a token is reported as such and not as "the gateway is down".
+    cred = client._cred
+    token_err = None
+    try:
+        cred.bearer(client)
+    except AuthError as e:
+        token_err = e
+    except DrumsError as e:
+        if cred.mode in ("token", "both"):
+            token_err = e
+    token_mode = cred.mode if cred.mode in ("token", "both") else None
+    token_origin = _origin(cred.token_url) if cred.token_url else None
+    console = (console_url or os.environ.get("DRUMS_CONSOLE_URL") or token_origin or DEFAULT_CONSOLE_URL).rstrip("/")
+    links = _Links(console, workspace or os.environ.get("DRUMS_WORKSPACE"))
     need_rate = desktops * REQUESTS_PER_DESKTOP_S
     need_burst = desktops * BURST_PER_DESKTOP
     need = {"requests_per_s": need_rate, "burst": need_burst, "requests_per_desktop_s": REQUESTS_PER_DESKTOP_S,
             "desktop_hours": desktops * hours}
     checks: list = []
     add = checks.append
+
+    # ---- token exchange (gateways in desktop-token mode) ------------------------------------------------------------
+    if token_err is not None:
+        add(Check("gateway", PASS, f"{client.url} answers (auth mode {token_mode or 'token'})"))
+        if isinstance(token_err, AuthError):
+            add(Check("auth", FAIL, f"the console refused the key when asked for a desktop token: {token_err.message}",
+                      "create a key (or check DRUMS_TOKEN has no stray space or newline)", links.page("api-keys", "API keys")))
+        else:
+            add(Check("auth", FAIL, f"no desktop token: {token_err.message}",
+                      "this gateway takes desktop tokens only; the console must answer to issue one: wait, or report it",
+                      token_origin or console))
+        return _finish(desktops, hours, checks, need, gpus, gpu_hour_usd, check_console, console, timeout)
 
     # ---- gateway (control plane) + auth ------------------------------------------------------------------------------
     health, t0 = None, time.monotonic()
@@ -288,7 +326,8 @@ def preflight(desktops: int, hours: float, *, model_gpus=None, task_set: str | N
             add(Check("auth", FAIL, f"the key expires in {left:.1f} h, before the {hours:g} h run ends ({exp})",
                       "create a key that outlives the run", links.page("api-keys", "API keys")))
         else:
-            add(Check("auth", PASS, f"key {key_row.get('name') or m.group(1)!s} accepted" + (f", expires {exp}" if exp else ", no expiry")))
+            add(_auth_pass(f"key {key_row.get('name') or m.group(1)!s} accepted" + (f", expires {exp}" if exp else ", no expiry"),
+                           cred, token_mode, token_origin, links))
         scopes = set(key_row.get("scopes") or [])
         missing = [s for s in REQUIRED_SCOPES if s not in scopes]
         wanted = [s for s in WANTED_SCOPES if s not in scopes]
@@ -302,7 +341,7 @@ def preflight(desktops: int, hours: float, *, model_gpus=None, task_set: str | N
             add(Check("scopes", PASS, ", ".join(sorted(scopes))))
     else:
         if not any(c.name == "auth" for c in checks):
-            add(Check("auth", PASS, "the key is accepted"))
+            add(_auth_pass("the key is accepted", cred, token_mode, token_origin, links))
         add(Check("scopes", SKIP, "the key's row was not found by its prefix, so its scopes and expiry are unknown",
                   "check the key's scopes on the API keys page", links.page("api-keys", "API keys")))
 
@@ -313,11 +352,17 @@ def preflight(desktops: int, hours: float, *, model_gpus=None, task_set: str | N
     except NotFound:
         lim_why = "this gateway does not publish GET /v1/limits yet"
     except DrumsError as e:
-        lim_why = f"GET /v1/limits failed: {e.message if e.status else e}"
+        if e.status == 403:
+            lim_why = "the key has no usage:read, which GET /v1/limits needs"
+        else:
+            lim_why = f"GET /v1/limits failed: {e.message if e.status else e}"
 
     # host capacity + admission
     cap = health.get("capacity") if isinstance(health.get("capacity"), dict) else {}
     live, mx = _num(cap, "live"), _num(cap, "max")
+    if (mx is None or live is None) and lim and lim["host_max"] is not None:
+        mx = lim["host_max"]
+        live = lim["host_live"] if lim["host_live"] is not None else (mx - lim["host_free"] if lim["host_free"] is not None else None)
     if mx is not None and live is not None:
         free = int(mx - live)
         if free >= desktops:
@@ -329,7 +374,8 @@ def preflight(desktops: int, hours: float, *, model_gpus=None, task_set: str | N
         add(Check("host capacity", SKIP, "the health reply carries no capacity"))
     stale = [c.get("id") for c in health.get("checkpoints") or [] if isinstance(c, dict) and c.get("stale_reason")]
     host_status = lim.get("host_status") if lim else None
-    if health.get("ok") is False:
+    admission = lim.get("host_admission") if lim else None
+    if health.get("ok") is False or admission == "down":
         add(Check("admission", FAIL, "drumsd on the bound host reports not ok: creates will be refused",
                   "the host needs an operator; report it with the request id", links.page("overview", "Overview")))
     elif host_status and host_status != "active":
@@ -339,7 +385,8 @@ def preflight(desktops: int, hours: float, *, model_gpus=None, task_set: str | N
         add(Check("admission", WARN, f"stale image checkpoints (creates from them are refused): {', '.join(map(str, stale))}",
                   "use another image or ask an operator to reinstall it", links.page("templates", "Desktop images")))
     else:
-        add(Check("admission", PASS, "drumsd ok, no stale checkpoint" + (f", host {host_status}" if host_status else "")))
+        add(Check("admission", PASS, "drumsd ok, no stale checkpoint" + (f", host {host_status}" if host_status else "")
+                  + (f", creates {admission}" if admission and admission != "open" else "")))
 
     # rate limit
     if lim and lim["rate_per_s"] is not None:
@@ -349,7 +396,8 @@ def preflight(desktops: int, hours: float, *, model_gpus=None, task_set: str | N
                       f"{need_rate:g} req/s and a burst of {need_burst:g} ({REQUESTS_PER_DESKTOP_S:g} req/s per active desktop)",
                       "ask for a training rate profile", links.page("usage", "Usage")))
         else:
-            add(Check("rate limit", PASS, f"{per_s:g} req/s, burst {burst if burst is not None else '?'}; need about {need_rate:g} req/s"))
+            add(Check("rate limit", PASS, f"{per_s:g} req/s, burst {burst if burst is not None else '?'}; need about {need_rate:g} req/s"
+                      + (f" (profile {lim['rate_profile']})" if lim.get("rate_profile") else "")))
     else:
         verdict = WARN if need_rate > DEFAULT_RATE_PER_S or need_burst > DEFAULT_RATE_BURST else SKIP
         add(Check("rate limit", verdict, f"not checked ({lim_why or 'GET /v1/limits has no rate_limit'}); {desktops} desktops need about "
@@ -397,6 +445,23 @@ def preflight(desktops: int, hours: float, *, model_gpus=None, task_set: str | N
         add(_task_set_check(client, task_set, lim, links, timeout))
 
     return _finish(desktops, hours, checks, need, gpus, gpu_hour_usd, check_console, console, timeout)
+
+
+def _origin(url: str) -> str:
+    u = urllib.parse.urlsplit(url)
+    return f"{u.scheme}://{u.netloc}"
+
+
+def _auth_pass(detail: str, cred, token_mode, token_origin, links) -> Check:
+    """The auth row once the gateway accepted the request: say how (desktop token or API key)."""
+    if token_mode and cred.using_token:
+        return Check("auth", PASS, f"{detail}; desktop token from {token_origin} (gateway auth mode {token_mode})")
+    if token_mode == "both":
+        return Check("auth", WARN, f"{detail}, but as the API key: the gateway takes desktop tokens and the exchange "
+                     f"failed ({cred.last_error or 'no token'})",
+                     "the run works on the key; check the console answers so the data path does not depend on it",
+                     token_origin or links.console)
+    return Check("auth", PASS, detail)
 
 
 def _task_set_check(client, task_set: str, lim, links, timeout) -> Check:

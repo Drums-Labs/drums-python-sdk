@@ -18,6 +18,7 @@ from drums import _preflight as pf, cli  # noqa: E402
 
 PREFIX = "abcdefghijkl"
 TOKEN = f"drums_sk_{PREFIX}_" + "Q" * 43
+DESKTOP_TOKEN = "eyJhbGciOiJFZERTQSJ9.eyJkIjoxfQ." + "s" * 86
 TS = "0b5c2a52-77a0-4c0e-9a39-0a7a0f3c1d10"
 
 
@@ -38,23 +39,52 @@ class Gw(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def do_POST(self):
+        st = Gw.state
+        n = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(n)
+        if self.path == "/api/v1/tokens":
+            st.setdefault("exchanges", []).append(self.headers.get("Authorization"))
+            if st.get("console_down"):
+                return self._reply(503, {"code": "retryable_infrastructure_failure"})
+            if self.headers.get("Authorization") != f"Bearer {TOKEN}":
+                return self._reply(401, {"error": "missing, invalid, revoked or expired API key", "code": "unauthenticated"})
+            return self._reply(200, {"token": DESKTOP_TOKEN, "expires_in": 3600, "renew_after_s": 3300})
+        return self._reply(404, {"error": "no such route", "code": "not_found"})
+
     def do_GET(self):
         st = Gw.state
         if self.path == "/sign-in":
             return self._reply(st.get("console", 200), {})
-        if self.headers.get("Authorization") != f"Bearer {TOKEN}":
+        if self.path == "/auth":
+            if "auth_mode" not in st:
+                return self._reply(404, {"error": "no such route", "code": "not_found"})
+            base = f"http://127.0.0.1:{self.server.server_address[1]}"
+            return self._reply(200, {"auth_mode": st["auth_mode"], "token_url": f"{base}/api/v1/tokens", "keys_url": None, "host_id": "h"})
+        got = self.headers.get("Authorization")
+        st.setdefault("seen", []).append(got)
+        mode = st.get("auth_mode")
+        if mode == "token" and got == f"Bearer {DESKTOP_TOKEN}":
+            pass                                            # a desktop token stands for the key
+        elif mode == "both" and got in (f"Bearer {DESKTOP_TOKEN}", f"Bearer {TOKEN}"):
+            pass
+        elif mode == "token" or got != f"Bearer {TOKEN}":
             return self._reply(401, {"error": "missing, invalid, revoked or expired API key", "code": "unauthenticated"})
         if st.get("binding"):
             return self._reply(403, {"error": "this endpoint serves another compute pool", "code": "forbidden"})
         if self.path == "/v1/health":
             time.sleep(st.get("health_delay", 0))
-            return self._reply(200, {"ok": st.get("ok", True), "version": "0.4.3", "checkpoints": st.get("checkpoints", [{"id": "osworld-ubuntu", "stale_reason": None}]),
-                                     "capacity": {"live": st.get("live", 10), "max": st.get("max", 200)}})
+            h = {"ok": st.get("ok", True), "version": "0.4.3", "checkpoints": st.get("checkpoints", [{"id": "osworld-ubuntu", "stale_reason": None}])}
+            if not st.get("no_capacity"):
+                h["capacity"] = {"live": st.get("live", 10), "max": st.get("max", 200)}
+            return self._reply(200, h)
         if self.path == "/v1/api-keys":
             row = {"id": "k1", "name": "trainer", "prefix": PREFIX, "scopes": st.get("scopes", ["computers:read", "computers:write", "runs:write", "usage:read"]),
                    "expires_at": st.get("expires_at"), "revoked_at": None}
             return self._reply(200, {"items": [{"id": "k0", "prefix": "zzzzzzzzzzzz", "scopes": []}, row]})
         if self.path == "/v1/limits":
+            if st.get("limits_403"):
+                return self._reply(403, {"error": "this key does not have the scope for this call", "code": "forbidden"})
             if "limits" not in st:
                 return self._reply(404, {"error": "no such route", "code": "not_found"})
             return self._reply(200, st["limits"])
@@ -168,7 +198,9 @@ class Preflight(unittest.TestCase):
         Gw.state = {"scopes": ["computers:read", "computers:write"]}
         c = self.row(self.pre(8), "scopes")
         self.assertEqual(c.status, "warn")
-        self.assertIn("runs:write", c.detail)
+        self.assertIn("usage:read", c.detail)
+        Gw.state = {"scopes": ["computers:read", "computers:write", "usage:read"]}       # computers:write opens runs too
+        self.assertEqual(self.row(self.pre(8), "scopes").status, "pass")
 
     def test_a_wrong_key_or_another_workspace(self):
         rep = self.pre(8, token=f"drums_sk_{PREFIX}_" + "X" * 43)
@@ -178,6 +210,89 @@ class Preflight(unittest.TestCase):
         c = self.row(self.pre(8), "auth")
         self.assertEqual(c.status, "fail")
         self.assertIn("another compute pool", c.detail)
+
+    def test_token_mode_exchanges_the_key_and_reads_the_limits(self):
+        Gw.state = {"auth_mode": "token", "limits": LIMITS, "task_set": VALID_SET}
+        rep = self.pre(128, 3.0, task_set=TS)
+        self.assertTrue(rep.ok, rep.table())
+        self.assertEqual({c.status for c in rep.checks}, {"pass"}, rep.table())
+        self.assertIn("desktop token from http://127.0.0.1", self.row(rep, "auth").detail)
+        self.assertEqual(Gw.state["exchanges"], [f"Bearer {TOKEN}"])
+        self.assertTrue(Gw.state["seen"])
+        self.assertNotIn(f"Bearer {TOKEN}", Gw.state["seen"], "in token mode the gateway only ever sees the token")
+        self.assertEqual(self.row(rep, "quota").status, "pass")
+        out = rep.table() + json.dumps(rep.to_dict())
+        self.assertNotIn(TOKEN, out)
+        self.assertNotIn(DESKTOP_TOKEN, out)
+
+    def test_token_mode_with_the_console_down_is_an_auth_failure_not_a_gateway_failure(self):
+        Gw.state = {"auth_mode": "token", "console_down": True}
+        c = drums.Client(self.url, TOKEN, retry_s=0.0, retry=drums.RetryPolicy(max_wait_s=0))
+        rep = drums.preflight(8, 1.0, client=c, check_console=False)
+        self.assertFalse(rep.ok)
+        self.assertEqual(self.row(rep, "gateway").status, "pass")
+        a = self.row(rep, "auth")
+        self.assertEqual(a.status, "fail")
+        self.assertIn("no desktop token", a.detail)
+        self.assertIn("HTTP 503", a.detail)
+        self.assertNotIn(TOKEN, rep.table())
+
+    def test_token_mode_with_a_refused_key(self):
+        Gw.state = {"auth_mode": "token"}
+        rep = self.pre(8, token=f"drums_sk_{PREFIX}_" + "X" * 43)
+        a = self.row(rep, "auth")
+        self.assertEqual(a.status, "fail")
+        self.assertIn("refused the key", a.detail)
+
+    def test_both_mode_with_the_console_down_warns_that_the_key_is_used(self):
+        Gw.state = {"auth_mode": "both", "console_down": True}
+        rep = self.pre(8)
+        self.assertTrue(rep.ok, rep.table())
+        a = self.row(rep, "auth")
+        self.assertEqual(a.status, "warn")
+        self.assertIn("as the API key", a.detail)
+
+    def test_the_console_row_defaults_to_the_token_urls_origin(self):
+        Gw.state = {"auth_mode": "token"}
+        rep = self.pre(8, check_console=True)
+        self.assertEqual(self.row(rep, "console").status, "pass")
+        self.assertIn(self.url, self.row(rep, "console").detail)
+
+    def test_the_limits_route_of_drums_49(self):
+        # the reply Drums-Labs/drums#49 serves, extra fields included
+        doc = {"workspace": {"id": "w", "max_live_computers": 128, "live_computers": 3, "max_spend_usd": 500, "spend_period": "month",
+                             "period_start": "2026-11-01T00:00:00.000Z", "period_end": "2026-12-01T00:00:00.000Z", "spent_usd": 41.23,
+                             "spent_age_s": 12, "used_pct": 8, "rate_limit_profile": "pilot"},
+               "rate_limit": {"per_s": 20, "burst": 60, "applies_to": "each API key, at this gateway"},
+               "price": {"desktop_hour_usd": 0.035, "source": "list_price"},
+               "host": {"id": "h1", "name": "drums-rc1", "status": "active", "max_desktops": 128, "live": 3, "free": 125,
+                        "admission": "open", "creates_in_flight": 0, "max_creates_in_flight": 4, "host_mem_available_bytes": 123},
+               "hosts": [], "cached": True}
+        v = pf._limits_view(doc)
+        self.assertEqual((v["max_live"], v["live"], v["max_spend"], v["spent"], v["rate_per_s"], v["rate_burst"], v["desktop_hour_usd"]),
+                         (128, 3, 500, 41.23, 20, 60, 0.035))
+        self.assertEqual((v["host_id"], v["host_status"], v["host_admission"], v["host_max"], v["host_free"], v["rate_profile"]),
+                         ("h1", "active", "open", 128, 125, "pilot"))
+        self.assertEqual(v["period_end"], "2026-12-01T00:00:00.000Z")
+        Gw.state = {"limits": doc}
+        rep = self.pre(16, 2.0)
+        self.assertEqual(self.row(rep, "quota").status, "pass")
+        self.assertEqual(self.row(rep, "spend cap").status, "pass")
+        self.assertIn("profile pilot", self.row(rep, "rate limit").detail)
+        Gw.state = {"limits": {**doc, "host": {**doc["host"], "admission": "down"}}}
+        self.assertEqual(self.row(self.pre(8), "admission").status, "fail")
+
+    def test_host_capacity_from_the_limits_when_health_has_none(self):
+        Gw.state = {"limits": {**LIMITS, "host": {"id": "h1", "status": "active", "max_desktops": 64, "free": 20}}, "no_capacity": True}
+        c = self.row(self.pre(32), "host capacity")
+        self.assertEqual(c.status, "fail")
+        self.assertIn("20 of 64", c.detail)
+
+    def test_a_key_without_usage_read_says_why_the_limits_were_not_read(self):
+        Gw.state = {"limits_403": True}
+        c = self.row(self.pre(8), "quota")
+        self.assertEqual(c.status, "not checked")
+        self.assertIn("usage:read", c.detail)
 
     def test_unreachable_gateway(self):
         rep = drums.preflight(8, 1.0, url="http://127.0.0.1:9", token=TOKEN, check_console=False)
