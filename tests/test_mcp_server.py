@@ -15,6 +15,7 @@ import drums  # noqa: E402
 from drums import mcp  # noqa: E402
 
 TOKEN = "k" * 43
+TS_ID = "0b5c2a52-77a0-4c0e-9a39-0a7a0f3c1d10"
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS_JSON = mcp.TOOLS_PATH  # the installed package's copy, so the test also proves the wheel ships it
 
@@ -56,7 +57,7 @@ class FakeGateway(BaseHTTPRequestHandler):
         u = urllib.parse.urlsplit(self.path)
         path, q = u.path, dict(urllib.parse.parse_qsl(u.query))
         parts = path.strip("/").split("/")
-        gateway_only = len(parts) >= 2 and parts[1] in ("runs", "api-keys", "audit")
+        gateway_only = len(parts) >= 2 and parts[1] in ("runs", "api-keys", "audit", "task-sets")
         if gateway_only and FakeGateway.no_runs:
             return self._send(404)                                 # axum's default: no body at all
         # ---- slots
@@ -69,6 +70,10 @@ class FakeGateway(BaseHTTPRequestHandler):
             return self._send(201, computer(7, checkpoint=body.get("checkpoint"), task=body.get("task")))
         if path.startswith("/v1/slots/"):
             cid = parts[2]
+            if cid == "bare" and len(parts) == 3 and method == "GET":
+                return self._send(200, computer(1, task=None))
+            if cid == "bare" and parts[3:] == ["verify"]:
+                return self._send(400, {"error": "drumsd rejected the request", "code": "invalid_request"})
             if cid == "missing":
                 return self._send(404, {"error": f"no env {cid} on this drumsd", "code": "not_found"})
             if len(parts) == 3 and method == "GET":
@@ -105,6 +110,18 @@ class FakeGateway(BaseHTTPRequestHandler):
             return self._send(200, rows)
         if path.startswith("/v1/tasks/"):
             return self._send(200, {"id": parts[2], "domain": "chrome", "instruction": "open a tab", "config": [], "evaluator": {"func": "x"}})
+        # ---- task sets
+        if path == "/v1/task-sets" and method == "GET":
+            return self._send(200, {"items": [{"id": TS_ID, "name": "factory", "task_count": 2}], "next_cursor": None})
+        if path == f"/v1/task-sets/{TS_ID}" and method == "GET":
+            return self._send(200, {"id": TS_ID, "name": "factory", "items": [{"task_id": "f-1"}, {"task_id": "f-2"}]})
+        if path.startswith(f"/v1/task-sets/{TS_ID}/tasks/") and method == "GET":
+            tid = urllib.parse.unquote(parts[4])
+            if tid not in ("f-1", "f-2"):
+                return self._send(404, {"error": "no such task in this set", "code": "not_found"})
+            return self._send(200, {"id": tid, "instruction": "make a folder", "config": [], "evaluator": {"func": "drums_verifier"}})
+        if path.startswith("/v1/task-sets/"):
+            return self._send(404, {"error": "no such task set", "code": "not_found"})
         # ---- runs
         if path == "/v1/runs" and method == "GET":
             return self._send(200, {"items": [{"id": "r1", "kind": q.get("kind") or "scripted_test", "status": q.get("status") or "queued"}], "next_cursor": None})
@@ -183,7 +200,7 @@ class GatewayTests(unittest.TestCase):
         with open(TOOLS_JSON) as f:
             want = json.load(f)["tools"]
         got = self.rpc(self.srv, "tools/list")["result"]["tools"]
-        self.assertEqual(len(got), 34)
+        self.assertEqual(len(got), 36)
         self.assertEqual([t["name"] for t in got], [t["name"] for t in want])
         for g, w in zip(got, want):
             self.assertEqual(g["description"], w["description"])
@@ -207,7 +224,7 @@ class GatewayTests(unittest.TestCase):
         # initialize and tools/list are answered from mcp_tools.json: no request reaches the gateway
         srv = mcp.Server(drums.Client("https://beta.drums.run/gw", TOKEN))
         self.assertEqual(self.rpc(srv, "initialize")["result"]["serverInfo"]["name"], "drums")
-        self.assertEqual(len(self.rpc(srv, "tools/list")["result"]["tools"]), 34)
+        self.assertEqual(len(self.rpc(srv, "tools/list")["result"]["tools"]), 36)
         self.assertEqual(FakeGateway.calls, [])
         # the Server never gets a client that would send the token over plain http off loopback
         with self.assertRaises(drums.InsecureTransport) as cm:
@@ -397,7 +414,37 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.last()[2], {"task": {"id": "inline"}})
         res, out = self.tool("load_task", {"computer_id": "c1"})
         self.assertTrue(res["isError"])
-        self.assertIn("task_id or task", out)
+        self.assertIn("one of task (a task document), task_set_id + task_id, or task_id", out)
+
+    def test_custom_tasks_by_task_set_and_as_a_json_string(self):
+        res, out = self.tool("list_task_sets", {})
+        self.assertEqual(out["task_sets"][0]["id"], TS_ID)
+        res, out = self.tool("get_task_set", {"task_set_id": TS_ID})
+        self.assertEqual([i["task_id"] for i in out["items"]], ["f-1", "f-2"])
+        res, out = self.tool("create_computer", {"template": "osworld-ubuntu", "task_set_id": TS_ID, "task_id": "f-2"})
+        self.assertFalse(res["isError"], out)
+        self.assertEqual(FakeGateway.calls[-2][:2], ("GET", f"/v1/task-sets/{TS_ID}/tasks/f-2"))
+        self.assertEqual(self.last()[2]["task"]["id"], "f-2")
+        self.assertEqual(self.last()[2]["task"]["evaluator"], {"func": "drums_verifier"})
+        res, out = self.tool("load_task", {"computer_id": "c1", "task_set_id": TS_ID, "task_id": "f-1"})
+        self.assertEqual(self.last()[2]["task"]["id"], "f-1")
+        res, out = self.tool("create_computer", {"template": "osworld-ubuntu", "task_set_id": TS_ID, "task_id": "nope"})
+        self.assertTrue(res["isError"])
+        self.assertIn("no such task in this set", out)
+        res, out = self.tool("create_computer", {"template": "osworld-ubuntu", "task_set_id": TS_ID})
+        self.assertIn("task_set_id needs task_id", out)
+        res, out = self.tool("create_computer", {"template": "osworld-ubuntu", "task": json.dumps({"id": "as-string", "instruction": "x"})})
+        self.assertFalse(res["isError"], out)
+        self.assertEqual(self.last()[2]["task"], {"id": "as-string", "instruction": "x"})
+        res, out = self.tool("create_computer", {"template": "osworld-ubuntu", "task": "not json"})
+        self.assertTrue(res["isError"])
+
+    def test_verify_without_a_task_says_so(self):
+        res, out = self.tool("verify", {"computer_id": "bare"})
+        self.assertTrue(res["isError"])
+        self.assertEqual(out, mcp.NO_TASK)
+        res, out = self.tool("verify", {"computer_id": "c1"})
+        self.assertFalse(res["isError"])
 
     # safety -----------------------------------------------------------------------------------------------------------
     def test_destructive_tools_refuse_without_confirm_before_any_request(self):

@@ -150,16 +150,16 @@ class CliTransport(unittest.TestCase):
             self.assertEqual(rc, 0, (url, err))
             self.assertEqual(err, "", url)
             reply = json.loads(out)
-            self.assertEqual(len(reply["result"]["tools"]), 34, url)      # tools/list needs no gateway
+            self.assertEqual(len(reply["result"]["tools"]), 36, url)      # tools/list needs no gateway
             self.assertNotIn(SECRET, out)
 
     def test_opt_in_flag_and_env_allow_plain_http(self):
         rc, out, err = run_cli(["mcp", "--url", "http://example.com", "--allow-insecure-http"], {"DRUMS_TOKEN": SECRET}, stdin=LIST_TOOLS)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(len(json.loads(out)["result"]["tools"]), 34)
+        self.assertEqual(len(json.loads(out)["result"]["tools"]), 36)
         rc, out, err = run_cli(["mcp", "--url", "http://example.com"], {"DRUMS_TOKEN": SECRET, "DRUMS_ALLOW_INSECURE_HTTP": "1"}, stdin=LIST_TOOLS)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(len(json.loads(out)["result"]["tools"]), 34)
+        self.assertEqual(len(json.loads(out)["result"]["tools"]), 36)
         self.assertNotIn(SECRET, out + err)
 
     def test_no_token_plain_http_is_not_refused(self):

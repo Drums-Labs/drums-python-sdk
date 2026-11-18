@@ -31,7 +31,7 @@ import sys
 import urllib.parse
 
 from . import Client, Env, RetryPolicy, __version__, connect
-from .errors import DrumsError, InsecureTransport, NotFound
+from .errors import BadRequest, DrumsError, InsecureTransport, NotFound
 from .hybrid import HybridTools
 
 PROTOCOL = "2025-06-18"
@@ -139,6 +139,23 @@ def _check(v, schema: dict, label: str):
     return None
 
 
+NO_TASK = "no task loaded on this computer: use load_task (task, task_set_id + task_id, or task_id), or create_computer with a task"
+
+
+def coerce_json_objects(schema: dict, args: dict) -> None:
+    """Some MCP clients send an object argument as a JSON string: for a property whose schema is an object, a string
+    that parses to a JSON object is replaced by that object before validation (as the gateway's server does)."""
+    for k, s in (schema.get("properties") or {}).items():
+        v = args.get(k)
+        if isinstance(s, dict) and s.get("type") == "object" and isinstance(v, str) and v.lstrip().startswith("{"):
+            try:
+                parsed = json.loads(v)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                args[k] = parsed
+
+
 def validate(schema: dict, args) -> str | None:
     """The first schema violation of a tool's arguments, naming the field; None when they are fine."""
     if not isinstance(args, dict):
@@ -221,12 +238,22 @@ class Server:
             raise
 
     def _task_doc(self, args: dict, required: bool):
+        """`task` (a whole document), `task_set_id` + `task_id` (a task of a registered set), or `task_id` alone (an
+        OSWorld task from the host's checkout). The same rules and messages as the gateway's server."""
         if isinstance(args.get("task"), dict):
             return args["task"]
+        if args.get("task_set_id"):
+            if not args.get("task_id"):
+                raise ToolError("task_set_id needs task_id: the id of a task in that set (get_task_set lists them)")
+            q = urllib.parse.quote
+            try:
+                return self._gateway("GET", f"/v1/task-sets/{q(str(args['task_set_id']))}/tasks/{q(str(args['task_id']), safe='')}")
+            except NotFound as e:
+                raise ToolError(f"{e.message}: task_set_id {args['task_set_id']}, task_id {args['task_id']}") from None
         if args.get("task_id"):
             return self._api("GET", f"/v1/tasks/{urllib.parse.quote(str(args['task_id']))}")
         if required:
-            raise ToolError("one of task_id or task is required")
+            raise ToolError("one of task (a task document), task_set_id + task_id, or task_id (an OSWorld task) is required")
         return None
 
     def _checkpoints(self) -> list:
@@ -280,6 +307,13 @@ class Server:
     def get_task(self, a):
         return self._api("GET", f"/v1/tasks/{urllib.parse.quote(a['task_id'])}")
 
+    def list_task_sets(self, a):
+        r = self._gateway("GET", "/v1/task-sets" + _q(limit=a.get("limit") or 50))
+        return {"task_sets": _rows(r, "task_sets"), "next": r.get("next_cursor") if isinstance(r, dict) else None}
+
+    def get_task_set(self, a):
+        return self._gateway("GET", f"/v1/task-sets/{urllib.parse.quote(a['task_set_id'])}")
+
     def _list_runs(self, a, kind=None):
         return self._gateway("GET", "/v1/runs" + _q(kind=kind, status=a.get("status"), limit=a.get("limit") or 50))
 
@@ -320,7 +354,20 @@ class Server:
 
     # desktop tools ------------------------------------------------------------------------------------------------------
     def verify(self, a):
-        r = self._env(a["computer_id"]).verify(strict=False)
+        env = self._env(a["computer_id"])
+        try:
+            r = env.verify(strict=False)
+        except BadRequest as e:
+            # drumsd answers 400 to a verify with no task (or a task without an OSWorld checker): say which (A-08)
+            if e.status != 400:
+                raise
+            try:
+                rec = env.refresh()
+            except DrumsError:
+                raise e from None
+            if not isinstance(rec.get("task"), dict):
+                raise ToolError(NO_TASK) from None
+            raise ToolError("the loaded task has no checker this host can run (it is not an OSWorld-format task with an evaluator)") from None
         return {"score": r.score, "valid": r.valid, "trusted": r.trusted, "audit_flags": r.audit_flags, "checker_error": r.checker_error}
 
     def fork(self, a):
@@ -360,6 +407,8 @@ class Server:
             args["computer_id"] = self.default_computer_id
         if tool.get("destructive") and not (isinstance(args, dict) and args.get("confirm") is True):
             raise ToolError(f"refused: pass confirm: true to {name}")
+        if isinstance(args, dict):
+            coerce_json_objects(tool["inputSchema"], args)
         problem = validate(tool["inputSchema"], args)
         if problem:
             raise ToolError(problem)

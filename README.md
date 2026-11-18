@@ -275,8 +275,12 @@ methods raise `drums.NotFound`. Concepts: [runs and evaluations](https://docs.dr
 
 ## MCP
 
-Drums publishes one MCP server with 34 tools: the workspace (computers, snapshots, tasks, runs, API keys, audit log)
-and the desktop itself (GUI, screenshot, shell, files, verify, fork, reset). Two ways to reach it:
+Drums publishes one MCP server with 36 tools: the workspace (computers, snapshots, tasks, task sets, runs, API keys,
+audit log) and the desktop itself (GUI, screenshot, shell, files, verify, fork, reset). `create_computer` and
+`load_task` take your own tasks too: `task` (a whole task document, as an object or a JSON string), `task_set_id` +
+`task_id` (a task of a set registered in the console or with `POST /v1/task-sets`; `list_task_sets` and
+`get_task_set` find them), or `task_id` alone (an OSWorld task). `verify` on a computer with no task says so. Two ways
+to reach it:
 
 | Transport | Where it runs | Address |
 |---|---|---|
