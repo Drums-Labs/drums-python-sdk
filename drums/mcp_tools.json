@@ -27,13 +27,14 @@
       "name": "create_computer",
       "layer": "workspace",
       "scope": "computers:write",
-      "description": "Start a new isolated desktop (computer) from a template or a snapshot, optionally with a task loaded. Returns the computer record; its `id` is the computer_id every desktop tool takes. The desktop is ready when state is `ready` and validity is `valid`.",
+      "description": "Start a new isolated desktop (computer) from a template or a snapshot, optionally with a task loaded. The task is one of: `task` (a whole task document, for tasks you wrote or generated), `task_set_id` + `task_id` (a task of a set registered in the console or with POST /v1/task-sets; see list_task_sets), or `task_id` alone (an OSWorld task from list_tasks). Returns the computer record; its `id` is the computer_id every desktop tool takes. The desktop is ready when state is `ready` and validity is `valid`.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "template": { "type": "string", "description": "A template checkpoint from list_templates (for example osworld-ubuntu) or a snapshot id from list_snapshots.", "minLength": 1, "maxLength": 200 },
-          "task_id": { "type": "string", "description": "A task id from list_tasks to load into the desktop at start (its setup runs before the episode).", "maxLength": 200 },
-          "task": { "type": "object", "description": "A full task document (OSWorld format) instead of task_id.", "additionalProperties": true },
+          "task_id": { "type": "string", "description": "With task_set_id: a task id of that set. Alone: an OSWorld task id from list_tasks. Its setup runs before the episode.", "maxLength": 200 },
+          "task_set_id": { "type": "string", "description": "A registered task set from list_task_sets; with task_id, the task to load from it.", "pattern": "^[0-9a-fA-F-]{36}$" },
+          "task": { "type": "object", "description": "A whole task document (OSWorld format: id, instruction, config, evaluator, ...) instead of task_id.", "additionalProperties": true },
           "ttl_s": { "type": "integer", "description": "Lifetime in seconds; the computer is closed when it expires (0 or absent: the workspace default).", "minimum": 0, "maximum": 2592000 },
           "setup": { "type": "boolean", "description": "Run the task's setup (default true when a task is given)." }
         },
@@ -134,16 +135,40 @@
       }
     },
     {
+      "name": "list_task_sets",
+      "layer": "workspace",
+      "scope": "computers:read",
+      "description": "List the task sets this workspace can use: the ones it registered (console Tasks page, POST /v1/task-sets, the drums-verifiers task factory) and the platform sets, with id, name, task_count and validation. get_task_set lists a set's task ids.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_task_set",
+      "layer": "workspace",
+      "scope": "computers:read",
+      "description": "One task set with its items (task_id, instruction, related_apps). Pass its id as task_set_id and an item's task_id to create_computer or load_task to run that task.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "task_set_id": { "type": "string", "pattern": "^[0-9a-fA-F-]{36}$" } },
+        "required": ["task_set_id"],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "load_task",
       "layer": "desktop",
       "scope": "computers:write",
-      "description": "Load a task into a running computer (runs its setup and starts a new episode). After this, `verify` scores the desktop against this task's checker.",
+      "description": "Load a task into a running computer (runs its setup and starts a new episode): `task` (a whole task document), `task_set_id` + `task_id` (a task of a registered set), or `task_id` alone (an OSWorld task). After this, `verify` scores the desktop against this task's checker.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "task_id": { "type": "string", "maxLength": 200 },
-          "task": { "type": "object", "additionalProperties": true }
+          "task_id": { "type": "string", "description": "With task_set_id: a task id of that set. Alone: an OSWorld task id from list_tasks.", "maxLength": 200 },
+          "task_set_id": { "type": "string", "description": "A registered task set from list_task_sets; with task_id, the task to load from it.", "pattern": "^[0-9a-fA-F-]{36}$" },
+          "task": { "type": "object", "description": "A whole task document (OSWorld format) instead of task_id.", "additionalProperties": true }
         },
         "required": ["computer_id"],
         "additionalProperties": false
@@ -442,7 +467,7 @@
       "name": "verify",
       "layer": "desktop",
       "scope": "computers:write",
-      "description": "Score the desktop's current state with the loaded task's checker: score (0..1), valid (every gate of the episode passed), trusted, audit flags.",
+      "description": "Score the desktop's current state with the loaded task's checker: score (0..1), valid (every gate of the episode passed), trusted, audit flags. On a computer with no task loaded it says so: load one with load_task first.",
       "inputSchema": {
         "type": "object",
         "properties": { "computer_id": { "type": "string", "minLength": 1, "maxLength": 64 } },
