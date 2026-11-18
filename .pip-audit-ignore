@@ -1,0 +1,2 @@
+# Accepted pip-audit advisories (A-40). One per line: <advisory id>  <review-by YYYY-MM-DD>  <reason>
+# An entry past its review date fails the audit. Empty: nothing is accepted today.
