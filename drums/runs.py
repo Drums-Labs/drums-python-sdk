@@ -17,6 +17,10 @@ Wire (gateway routes; the SDK feature-detects them and is a no-op with one warni
                                             desktops_provisioned, at, extra?}]}
     POST /v1/runs/{id}/close      {status: completed | failed | cancelled, error, steps_total}
 
+`config` is sent only as a JSON object of at most 16 KiB (the gateway's bound); anything else goes as `config_hash`
+plus `config_summary` (scalar top-level values), with one warning. A 400/422 on open is the gateway refusing the body:
+one warning with its message, `run.id` stays None and the open is not resent; only 404/405 mean no run routes.
+
 A 409 on PATCH or close means the gateway has ended the run (closed, or marked lost after 30 min without a
 heartbeat): the SDK stops sending for it, with one warning, instead of retrying the same points forever.
 
@@ -48,6 +52,8 @@ from .errors import AuthError, BadRequest, Conflict, DrumsError, NotFound
 DEFAULT_FLUSH_S = 30.0
 MAX_BUFFER = 10_000
 LABEL_MAX = 120          # the gateway keeps at most 120 characters of a run label
+CONFIG_MAX = 16 * 1024   # the gateway takes `config` as a JSON object of at most 16 KiB
+CONFIG_SUMMARY_MAX = 2048
 RUN_KINDS = ("training", "evaluation", "eval", "rl")   # the gateway stores evaluation/eval as eval, rl as training
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
@@ -56,12 +62,34 @@ def is_uuid(v) -> bool:
     return isinstance(v, str) and bool(_UUID.match(v))
 
 
+def _canonical(config) -> str:
+    return json.dumps(config, sort_keys=True, separators=(",", ":"), default=str)
+
+
 def config_hash(config) -> str | None:
     """sha256 of the canonical JSON of `config` (sorted keys, no spaces); None when there is no config."""
     if config is None:
         return None
-    text = json.dumps(config, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(text.encode()).hexdigest()
+    return hashlib.sha256(_canonical(config).encode()).hexdigest()
+
+
+def config_summary(config, budget: int = CONFIG_SUMMARY_MAX) -> dict:
+    """The top-level keys of `config` whose values are scalars (str, number, bool, null), sorted by key, strings cut to
+    200 characters, keys dropped once the summary's canonical JSON would pass `budget` bytes. {} for a non-object."""
+    out: dict = {}
+    if not isinstance(config, dict):
+        return out
+    for k in sorted(config, key=str):
+        v = config[k]
+        if isinstance(v, str):
+            v = v[:200]
+        elif not (v is None or isinstance(v, (bool, int, float))):
+            continue
+        out[str(k)[:200]] = v
+        if len(_canonical(out).encode()) > budget:
+            del out[str(k)[:200]]
+            break
+    return out
 
 
 def _now_iso() -> str:
@@ -99,6 +127,7 @@ class Run:
         self.label = (label or self.name)[:LABEL_MAX]
         self.desktops_provisioned = desktops_provisioned
         self.ended: str | None = None            # set when the gateway answered 409: the run ended there
+        self.refused: str | None = None          # set when the gateway answered 400 to the open (its message)
         self.id: str | None = None
         self.record: dict = {}
         self.supported: bool | None = None       # None: not tried yet
@@ -143,9 +172,17 @@ class Run:
             self.client._push_run(self)
             self._labelled = True
             atexit.register(self._at_exit)
-        if self.id or self.supported is False:
+        if self.id or self.supported is False or self.refused:
             return self
-        body = {"name": self.name, "kind": self.kind, "config": self.config, "config_hash": self.config_hash, "label": self.label}
+        body = {"name": self.name, "kind": self.kind, "config_hash": self.config_hash, "label": self.label}
+        if self.config is None or (isinstance(self.config, dict) and len(_canonical(self.config).encode()) <= CONFIG_MAX):
+            body["config"] = self.config
+        else:
+            # the gateway takes an object of at most 16 KiB: send the hash and a summary of the scalar top-level keys
+            body["config_summary"] = config_summary(self.config)
+            why = "is not a JSON object" if not isinstance(self.config, dict) else "is over 16 KiB as JSON"
+            self._warn("config", f"the config {why}, so only its hash and a summary of its top-level values were sent "
+                       "(the full config was not uploaded)")
         if self.desktops_provisioned is not None:
             body["desktops_provisioned"] = int(self.desktops_provisioned)
         if self.task_set is not None:
@@ -157,8 +194,16 @@ class Run:
             self.status = "closed"
             self._release()
             raise
-        except (BadRequest, NotFound) as e:          # 400/404/405/422: today's gateway (RunSpec only) or a plain drumsd
-            self._unsupported(f"POST /v1/runs answered {e.status}: {e.message}", e)
+        except (BadRequest, NotFound) as e:
+            if e.status in (404, 405):                # no run routes: a plain drumsd, or a gateway without them
+                self._unsupported(f"POST /v1/runs answered {e.status}: {e.message}", e)
+                return self
+            # 400/422: the gateway has the route and refused this body; say what it said, do not resend it
+            self.refused = str(e.message)
+            if self.strict:
+                raise
+            self._warn("refused", f"the gateway refused to open the run ({e.status}: {e.message}); it is not recorded, "
+                       "training goes on, desktops still get the run label")
             return self
         except DrumsError as e:
             if e.status == 403:
@@ -196,7 +241,7 @@ class Run:
         with self._lock:
             self.steps_total += 1
             self.last = point
-            if self.supported is False or self.ended:
+            if self.supported is False or self.ended or self.refused:
                 return
             self._buf.append(point)
             if len(self._buf) > MAX_BUFFER:
@@ -209,7 +254,7 @@ class Run:
 
     def flush(self) -> bool:
         """Send the buffered points now (PATCH /v1/runs/{id}). True when nothing is left to send."""
-        if self.supported is False or self.ended:
+        if self.supported is False or self.ended or self.refused:
             return True
         if not self.id:
             self.open()

@@ -280,6 +280,10 @@ with client.run("qwen27b-d2", kind="training", task_set=task_set_id, config=cfg,
 - Desktops created while the run is open carry its label (`X-Drums-Run-Label`, and `X-Drums-Run-Id`; fork children
   inherit it), so the Computers page can filter them by run. The label is the run's name, or the one the gateway's
   open reply names (`run.label`) when another running run already holds that name.
+- `config` goes up as is when it is a JSON object of at most 16 KiB. Otherwise only its `config_hash` (sha256 of
+  its canonical JSON) and a `config_summary` (its scalar top-level values) are sent, with one warning.
+- A 400 on open is the gateway refusing that body: one warning with the gateway's message, `run.id` stays None, and
+  training goes on (`strict=True` raises `BadRequest`). Only a 404 or 405 means the gateway has no run routes.
 - A 409 on a heartbeat or on close means the run has ended on the gateway (closed elsewhere, or marked lost after
   30 min without a heartbeat). The SDK stops sending for it with one warning (`run.ended` says why); training goes on.
 - On a gateway without the run routes (`POST /v1/runs` for training runs, `PATCH /v1/runs/{id}`,

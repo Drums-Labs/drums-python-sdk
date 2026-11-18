@@ -47,6 +47,8 @@ class Gw(BaseHTTPRequestHandler):
                 return self._reply(503, {"error": "the service is busy", "code": "retryable_infrastructure_failure"})
             if Gw.mode == "noscope":
                 return self._reply(403, {"error": "this key does not have the scope for this call", "code": "forbidden"})
+            if Gw.mode == "noroutes":
+                return self._reply(404, {"error": "no such route", "code": "not_found"})
             if Gw.mode == "today":
                 if self.command == "POST" and self.path == "/v1/runs":
                     return self._reply(400, {"error": "invalid run spec: task_ids Required", "code": "invalid_request"})
@@ -175,6 +177,63 @@ class RunObject(unittest.TestCase):
         self.assertEqual(creates[1].get("X-Drums-Run-Id"), RUN_ID)
         self.assertIsInstance(r, drums.Run)
 
+    def test_a_gateway_without_run_routes_is_a_noop_with_one_warning(self):
+        Gw.mode = "noroutes"
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            with self.c.run("d2", kind="training") as r:
+                r.step(0)
+        msgs = [str(x.message) for x in w if issubclass(x.category, RuntimeWarning)]
+        self.assertEqual(len(msgs), 1, msgs)
+        self.assertIn("not recorded on the gateway", msgs[0])
+        self.assertFalse(r.supported)
+        with self.assertRaises(drums.RunNotSupported):
+            with self.c.run("d3", kind="training", strict=True):
+                pass
+
+    def test_a_400_on_open_is_the_gateways_message_not_missing_routes(self):
+        Gw.mode = "today"                                   # answers 400 to the open body
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            with self.c.run("d2", kind="training") as r:
+                for i in range(5):
+                    r.step(i)
+        msgs = [str(x.message) for x in w if issubclass(x.category, RuntimeWarning)]
+        self.assertEqual(len(msgs), 1, msgs)
+        self.assertIn("refused to open the run", msgs[0])
+        self.assertIn("invalid run spec: task_ids Required", msgs[0])
+        self.assertNotIn("not recorded on the gateway", msgs[0])
+        self.assertIsNone(r.id)
+        self.assertIsNot(r.supported, False)
+        self.assertEqual(len(self.calls("POST", "/v1/runs")), 1)
+
+    def test_a_config_that_is_not_an_object_or_too_big_sends_its_hash_and_a_summary(self):
+        big = {"lr": 1e-5, "model": "Qwen3.5-27B", "k": 6, "on": True, "none": None, "layers": list(range(5000)), "nested": {"a": 1}}
+        for cfg, why in ((big, "over 16 KiB"), ([1, 2, 3], "not a JSON object")):
+            Gw.calls.clear()
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                with self.c.run("d2", kind="training", config=cfg) as r:
+                    r.step(0)
+            body = self.calls("POST", "/v1/runs")[0]["body"]
+            self.assertNotIn("config", body)
+            self.assertEqual(body["config_hash"], runs.config_hash(cfg))
+            msgs = [str(x.message) for x in w if "full config was not uploaded" in str(x.message)]
+            self.assertEqual(len(msgs), 1)
+            self.assertIn(why, msgs[0])
+            self.assertEqual(r.id, RUN_ID)
+        self.assertEqual(runs.config_summary(big), {"k": 6, "lr": 1e-5, "model": "Qwen3.5-27B", "none": None, "on": True})
+        self.assertEqual(runs.config_summary([1, 2]), {})
+        huge = {f"k{i:04d}": "v" * 300 for i in range(100)}
+        summ = runs.config_summary(huge)
+        self.assertLessEqual(len(json.dumps(summ, sort_keys=True, separators=(",", ":"))), runs.CONFIG_SUMMARY_MAX)
+        self.assertTrue(summ)
+        self.assertTrue(all(len(v) == 200 for v in summ.values()))
+        Gw.calls.clear()
+        with self.c.run("d2", kind="training", config={"lr": 1e-5}):
+            pass
+        self.assertEqual(self.calls("POST", "/v1/runs")[0]["body"]["config"], {"lr": 1e-5})   # a small object goes as is
+
     def test_on_todays_gateway_it_is_a_noop_with_one_warning_and_labels_still_apply(self):
         Gw.mode = "today"
         with warnings.catch_warnings(record=True) as w:
@@ -185,8 +244,7 @@ class RunObject(unittest.TestCase):
                 self.c.create()
         msgs = [str(x.message) for x in w if issubclass(x.category, RuntimeWarning)]
         self.assertEqual(len(msgs), 1, msgs)
-        self.assertIn("not recorded on the gateway", msgs[0])
-        self.assertFalse(r.supported)
+        self.assertIn("refused to open the run", msgs[0])
         self.assertIsNone(r.id)
         self.assertEqual(r.steps_total, 50)
         self.assertEqual(len(self.calls("POST", "/v1/runs")), 1)                     # tried once, never again
@@ -196,7 +254,7 @@ class RunObject(unittest.TestCase):
 
     def test_strict_raises_on_todays_gateway(self):
         Gw.mode = "today"
-        with self.assertRaises(drums.RunNotSupported):
+        with self.assertRaises(drums.BadRequest):
             with self.c.run("d2", kind="training", strict=True):
                 pass
 

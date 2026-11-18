@@ -48,7 +48,9 @@ feature falls back as described below.
   Desktops created inside carry `X-Drums-Run-Label` (the label the open reply names, which differs from the name
   when another running run holds it) and `X-Drums-Run-Id`. A 409 on a heartbeat or close means the run has ended on
   the gateway (closed, or lost after 30 min without a heartbeat): the SDK stops sending for it with one warning
-  (`run.ended`). On a gateway without these routes, or with a key that has neither `runs:write` nor
+  (`run.ended`). A `config` that is not a JSON object or is over 16 KiB as JSON is sent as its `config_hash` and a
+  `config_summary` (scalar top-level values), with one warning. A 400 on open warns with the gateway's message and
+  leaves `run.id` None; only a 404 or 405 means the routes are missing. On a gateway without these routes, or with a key that has neither `runs:write` nor
   `computers:write`, it is a no-op with one warning (`strict=True` raises `RunNotSupported`).
   `client.run(<run uuid>)` alone still returns the run's record; `get_run` and `open_run` are the explicit names.
 - **`drums preflight`** (#13). `drums preflight --desktops N --hours H [--model-gpus 2:6] [--task-set ID] [--json]`
