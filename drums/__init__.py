@@ -18,8 +18,16 @@ Validity: every create/reset/fork child starts an episode with a gate report (is
 cgroup limits, state hash, processes alive after resume, ...). An episode is valid only when every gate passed and
 the env was never quarantined (`Reward.valid`; the reasons are in `Reward.invalid_reasons`). `verify()` always
 carries the verdict; by default it raises InvalidEpisode instead of returning a reward from an invalid episode.
-Retries: drumsd itself retries only failures that happened before any restored process ran; the SDK retries only GET
-requests while drumsd is unreachable. Everything else is raised with the gate report.
+Retries: drumsd itself retries only failures that happened before any restored process ran. The SDK retries GET
+requests while drumsd is unreachable, and any request (step, screenshot, verify, create, ...) the server refused with
+429 (rate limited, or no capacity right now: nothing was started), waiting at least the reply's Retry-After, with
+jittered backoff, within `RetryPolicy.max_wait_s` (default 60 s; `retry=RetryPolicy(max_wait_s=0)` or
+$DRUMS_RETRY_MAX_WAIT_S=0 turns it off). Everything else is raised with the gate report.
+
+TLS: when the system certificate store cannot verify the server (python.org's macOS Python ships without root
+certificates until "Install Certificates.command" runs), the client retries the handshake once with certifi's CA
+bundle if certifi is installed, and says so in one line on stderr; without certifi it raises CertificateError with
+the fix.
 
 Cleanup: envs and saved states have leases on the server (default: reaped after 30 min unused; `idle_timeout=` and
 `ttl=` on create/fork/save change that, 0 = never), so a crashed trainer does not hold the host forever. The client
@@ -30,10 +38,14 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures as cf
+import email.utils
 import ipaddress
 import json
 import os
+import random
+import ssl
 import struct
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -44,11 +56,13 @@ import signal
 import threading
 import warnings
 
-from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerError, CheckpointStale, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
+from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CertificateError, CheckerError, CheckpointStale, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
                      EnvGone, ForkError, GateFailed, GuestError, InsecureTransport, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RedirectRefused, RestoreFailed, TaskSetupFailed,
                      TaskUnsupported)
+from . import runs as _runs
+from .runs import Run, RunNotSupported
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or "http://127.0.0.1:7070"
 DEFAULT_IMAGE = "osworld-ubuntu"
 
@@ -56,6 +70,8 @@ __all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", 
            "DrumsError", "AuthError", "BadRequest", "NotFound", "EnvGone", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
            "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded",
            "CheckpointStale", "TaskUnsupported", "InsecureTransport", "RedirectRefused", "check_transport"]
+
+__all__ += ["Run", "RunNotSupported"]
 
 _STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 410: EnvGone, 422: BadRequest, 429: Overloaded, 502: GuestError,
            503: DaemonUnavailable}
@@ -146,8 +162,264 @@ class _RedirectPolicy(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, 307 if code == 308 else code, msg, headers, newurl)
 
 
+class RetryPolicy:
+    """How a Client retries a request the server refused with 429: the gateway's per-key rate limit (`rate_limited`),
+    or no capacity right now (`overloaded`: host full, memory admission, too many creates in flight). A 429 means
+    nothing was started, so every method is retried, POSTs included (step, verify, create, fork, ...).
+
+    Each wait is at least the reply's Retry-After (seconds or an HTTP date), else `base_s * 2**attempt`, capped at
+    `cap_s`, plus up to `jitter` (a fraction) of random extra so many desktops do not retry in lockstep. The client
+    gives up (raises the 429's error, e.g. Overloaded, with `.retry_after`) after `max_attempts` retries or when the
+    next wait would take the call past `max_wait_s` seconds of waiting. `max_wait_s=0` turns retries off (the 0.3.0
+    behaviour). The default budget is 60 s, or $DRUMS_RETRY_MAX_WAIT_S when set."""
+
+    def __init__(self, max_wait_s: float = 60.0, max_attempts: int = 20, base_s: float = 0.5, cap_s: float = 30.0,
+                 jitter: float = 0.25):
+        self.max_wait_s, self.max_attempts, self.base_s, self.cap_s, self.jitter = max_wait_s, max_attempts, base_s, cap_s, jitter
+
+    @classmethod
+    def from_env(cls) -> "RetryPolicy":
+        v = os.environ.get("DRUMS_RETRY_MAX_WAIT_S", "").strip()
+        try:
+            return cls(max_wait_s=max(0.0, float(v))) if v else cls()
+        except ValueError:
+            return cls()
+
+    def wait(self, attempt: int, retry_after: float | None) -> float:
+        """Seconds to wait before retry number `attempt` (0-based)."""
+        base = min(self.cap_s, self.base_s * (2 ** attempt))
+        if retry_after is not None:
+            base = max(retry_after, min(base, retry_after + self.base_s))  # the server's number, not our backoff, leads
+        return base + random.uniform(0, self.jitter * max(base, self.base_s))
+
+    def __repr__(self):
+        return (f"RetryPolicy(max_wait_s={self.max_wait_s}, max_attempts={self.max_attempts}, base_s={self.base_s}, "
+                f"cap_s={self.cap_s}, jitter={self.jitter})")
+
+
+__all__ += ["RetryPolicy", "CertificateError"]
+
+
+def _retry_after(headers) -> float | None:
+    """A Retry-After header in seconds (delta-seconds or an HTTP date), None when absent or not understood."""
+    v = headers.get("Retry-After") if headers is not None else None
+    if not v:
+        return None
+    v = v.strip()
+    try:
+        return max(0.0, float(v))
+    except ValueError:
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(v)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when is None:
+        return None
+    return max(0.0, when.timestamp() - time.time())
+
+
+def _is_cert_failure(e: BaseException) -> bool:
+    reason = getattr(e, "reason", e)
+    return isinstance(reason, ssl.SSLCertVerificationError) or isinstance(e, ssl.SSLCertVerificationError)
+
+
+def _certifi_context():
+    """An SSL context with certifi's CA bundle, or None when certifi is not installed."""
+    try:
+        import certifi  # noqa: PLC0415
+    except ImportError:
+        return None
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+_CERT_HINT = ("python.org's macOS Python has no root certificates until you run \"Install Certificates.command\" "
+              "(in /Applications/Python 3.x/); or `pip install certifi` and the SDK uses it automatically")
+API_KEY_PREFIX = "drums_sk_"
+TOKEN_RENEW_BEFORE_S = 300.0
+
+
+class _Credentials:
+    """The credential the caller passed and, when the gateway advertises desktop tokens, the token exchanged for it.
+
+    A Drums API key (`drums_sk_...`) given to a gateway in `token` or `both` mode (GET <url>/auth) is sent once to
+    the console's token URL; the gateway then gets only the short-lived desktop token, renewed before it expires (at
+    the console's `renew_after_s`, else 5 min before `expires_in`) and once after a 401. Any other credential (a drumsd
+    token) is sent as it is and nothing is discovered. Neither value is ever part of a repr, a log line or an error
+    message: errors name the origin and the HTTP status only.
+
+    The exchange (and every renewal) uses the client's transport: the certifi fallback when the system certificate
+    store cannot verify the console, and the client's RetryPolicy for a 429 (waiting at least its Retry-After). In
+    `token` mode, where there is no fallback, a 5xx or a dropped connection is retried within the same budget too;
+    asking for a token twice only mints a second token, so it is always safe to repeat."""
+
+    def __init__(self, key: str | None):
+        self._key = key
+        self._lock = threading.Lock()
+        self._mode = None if key and key.startswith(API_KEY_PREFIX) else "plain"
+        self._token_url = None
+        self._token = None
+        self._renew_at = 0.0
+        self._expires_at = 0.0
+        self._next_try = 0.0          # `both` mode with the console away: try the exchange again after this
+        self.last_error: str | None = None   # why the last exchange failed (origin and status only), for preflight
+
+    def __repr__(self):
+        return f"<drums credentials: {self.kind}>"
+
+    __str__ = __repr__
+
+    @property
+    def kind(self) -> str:
+        if not self._key:
+            return "none"
+        if self._mode == "plain":
+            return "token"
+        if self._mode in ("token", "both"):
+            return "desktop token" if self._token else "api key (token exchange pending)"
+        return "api key"
+
+    @property
+    def using_token(self) -> bool:
+        return self._token is not None
+
+    @property
+    def mode(self) -> str | None:
+        """`plain` (a drumsd token), `api_key`, `token`, `both`, or None while the gateway's mode is not known yet."""
+        return self._mode
+
+    @property
+    def token_url(self) -> str | None:
+        return self._token_url
+
+    @property
+    def undiscovered(self) -> bool:
+        """An API key whose gateway mode is not known yet (the discovery request did not get an answer)."""
+        return bool(self._key) and self._mode is None
+
+    def invalidate(self):
+        with self._lock:
+            self._token, self._renew_at, self._expires_at = None, 0.0, 0.0
+
+    def bearer(self, client) -> str | None:
+        """The value for `Authorization: Bearer`, exchanging or renewing the desktop token when needed."""
+        if not self._key:
+            return None
+        if self._mode == "plain":
+            return self._key
+        if self._mode is None:
+            self._discover(client)
+        if self._mode not in ("token", "both"):
+            return self._key
+        with self._lock:
+            now = time.time()
+            if self._token and now < self._renew_at:
+                return self._token
+            if not self._token and self._mode == "both" and now < self._next_try:
+                return self._key
+            # a renewal while the old token is still good, or `both` mode (the key still works), need not wait long
+            has_fallback = (self._token is not None and now < self._expires_at - 30) or self._mode == "both"
+            try:
+                self._exchange(client, now, patient=not has_fallback)
+            except (AuthError, InsecureTransport, RedirectRefused):
+                raise
+            except DrumsError as e:
+                self.last_error = e.message
+                # renewal failed while the old token is still valid: keep using it until it expires
+                if self._token and now < self._expires_at - 30:
+                    return self._token
+                if self._mode == "both":        # the gateway still takes the API key; retry the exchange in a minute
+                    self._next_try = now + 60.0
+                    return self._key
+                raise
+            self.last_error = None
+            return self._token
+
+    def _discover(self, client):
+        """GET <url>/auth once (no credential). A definite answer is remembered; a network failure is not."""
+        req = urllib.request.Request(client.url + "/auth", method="GET", headers={"Accept": "application/json"})
+        try:
+            with client._opener.open(req, timeout=min(client.timeout, 15.0)) as r:
+                info = json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as e:
+            e.close()
+            self._mode = "api_key"              # drumsd, or a gateway without token support
+            return
+        except (RedirectRefused, urllib.error.URLError, ConnectionError, TimeoutError, OSError, ValueError) as e:
+            if _is_cert_failure(e) and client._use_certifi():
+                return self._discover(client)    # once: _use_certifi is False the second time
+            return                              # unknown for now; the request itself will report the transport problem
+        mode = info.get("auth_mode") if isinstance(info, dict) else None
+        url = info.get("token_url") if isinstance(info, dict) else None
+        if mode in ("token", "both") and isinstance(url, str) and url:
+            check_transport(url, self._key, client.allow_insecure_http)
+            self._mode, self._token_url = mode, url
+        else:
+            self._mode = "api_key"
+
+    def _exchange(self, client, now: float, patient: bool = True):
+        """POST the key to the token URL. A 429 is retried under the client's RetryPolicy (at least its Retry-After);
+        with `patient` (token mode and no valid token: nothing else would work) a 5xx or a dropped connection is too.
+        A failed certificate check switches the client to certifi's bundle once, as for the gateway."""
+        url = self._token_url
+        origin = _origin_text(url)
+        policy = client.retry
+        waited, attempt = 0.0, 0
+
+        def backoff(ra) -> bool:
+            nonlocal waited, attempt
+            if policy is None or attempt >= policy.max_attempts:
+                return False
+            w = policy.wait(attempt, ra)
+            if waited + w > policy.max_wait_s:
+                return False
+            attempt += 1
+            waited += w
+            time.sleep(w)
+            return True
+
+        while True:
+            opener = client._build_opener(self._key)
+            req = urllib.request.Request(url, data=b"", method="POST",
+                                         headers={"Authorization": f"Bearer {self._key}", "Accept": "application/json", "Content-Length": "0"})
+            try:
+                with opener.open(req, timeout=min(client.timeout, 30.0)) as r:
+                    body = json.loads(r.read() or b"null")
+                break
+            except urllib.error.HTTPError as e:
+                status = e.code
+                ra = _retry_after(e.headers)
+                e.close()
+                if status == 401:
+                    raise AuthError(401, f"the console at {origin} refused the API key (missing, invalid, revoked or expired)") from None
+                if (status == 429 or (patient and status >= 500)) and backoff(ra):
+                    continue
+                err = DaemonUnavailable(status, f"could not exchange the API key for a desktop token at {origin} (HTTP {status})")
+                err.retry_after = ra
+                raise err from None
+            except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+                if _is_cert_failure(e):
+                    if client._use_certifi(origin):
+                        continue
+                    raise CertificateError(origin, str(getattr(e, "reason", e)),
+                                           "certifi's bundle could not verify it either" if client._certifi else _CERT_HINT) from None
+                if patient and backoff(None):
+                    continue
+                raise DaemonUnavailable(0, f"could not exchange the API key for a desktop token at {origin}: {type(e).__name__}") from None
+            except ValueError:
+                raise DaemonUnavailable(0, f"the token reply from {origin} was not JSON") from None
+        tok = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(tok, str) or not tok:
+            raise DaemonUnavailable(0, f"the token reply from {origin} had no token")
+        life = float(body.get("expires_in") or 3600)
+        renew_after = body.get("renew_after_s")
+        renew_after = float(renew_after) if isinstance(renew_after, (int, float)) else max(life - TOKEN_RENEW_BEFORE_S, life / 2)
+        self._token, self._renew_at, self._expires_at = tok, now + max(0.0, min(renew_after, life)), now + life
+
+
 def connect(url: str | None = None, token: str | None = None, *, timeout: float = 900.0, retry_s: float = 60.0, check: bool = True,
-            close_on_exit: bool = True, handle_signals: bool = True, allow_insecure_http: bool | None = None) -> "Client":
+            close_on_exit: bool = True, handle_signals: bool = True, allow_insecure_http: bool | None = None,
+            retry: "RetryPolicy | None" = None) -> "Client":
     """A client for one drumsd. `url`/`token` default to $DRUMS_URL / $DRUMS_TOKEN. With check=True the token is tried
     at once (AuthError / DaemonUnavailable here rather than on the first create).
     A token is only sent over https, or over plain http to localhost / 127.0.0.0/8 / ::1; any other http URL raises
@@ -155,9 +427,10 @@ def connect(url: str | None = None, token: str | None = None, *, timeout: float 
     close_on_exit=True: the envs this client created and did not close are closed when the process exits (atexit) or
     when the client is used as a context manager and the block ends. handle_signals=True: SIGTERM and SIGHUP exit
     through that cleanup too, when their handler is still the default one (never replaces a handler you installed;
-    main thread only). A `kill -9` cannot be caught: the server-side leases reap those envs."""
+    main thread only). A `kill -9` cannot be caught: the server-side leases reap those envs.
+    retry: how 429 replies are retried on every call (RetryPolicy; default RetryPolicy.from_env())."""
     c = Client(url or DEFAULT_URL, token if token is not None else os.environ.get("DRUMS_TOKEN"), timeout=timeout, retry_s=retry_s,
-               close_on_exit=close_on_exit, handle_signals=handle_signals, allow_insecure_http=allow_insecure_http)
+               close_on_exit=close_on_exit, handle_signals=handle_signals, allow_insecure_http=allow_insecure_http, retry=retry)
     if check:
         c.health()
     return c
@@ -184,8 +457,10 @@ class Client:
     """A connection to one drumsd (use drums.connect). Creates envs, lists them, and reads health and metrics."""
 
     def __init__(self, url: str = DEFAULT_URL, token: str | None = None, timeout: float = 900.0, retry_s: float = 60.0,
-                 close_on_exit: bool = False, handle_signals: bool = False, allow_insecure_http: bool | None = None):
+                 close_on_exit: bool = False, handle_signals: bool = False, allow_insecure_http: bool | None = None,
+                 retry: RetryPolicy | None = None):
         self.url, self.timeout, self.retry_s = url.rstrip("/"), timeout, retry_s
+        self.retry = retry if retry is not None else RetryPolicy.from_env()
         self.token = token if token is not None else os.environ.get("DRUMS_TOKEN")
         check_transport(self.url, self.token, allow_insecure_http)   # InsecureTransport: a token over plain http off-loopback
         if allow_insecure_http is None:
@@ -193,13 +468,20 @@ class Client:
         self.allow_insecure_http = bool(allow_insecure_http)
         # redirects: same origin only, MAX_REDIRECTS hops, check_transport on every hop (RedirectRefused otherwise)
         self._opener = urllib.request.build_opener(_RedirectPolicy(self.token, self.allow_insecure_http))
+        self._certifi = False          # True once the system store failed and certifi's bundle is in use
+        self._certifi_ctx = None
+        self._cred = _Credentials(self.token)    # API key -> desktop token exchange when the gateway asks for it
         self._owned: dict[str, None] = {}          # ids of envs this client created and has not closed (insertion order)
         self._owned_lock = threading.Lock()
+        self._runs: list = []                      # open Run objects, innermost last: creates carry its label
         self.close_on_exit = close_on_exit
         if close_on_exit:
             atexit.register(self._close_at_exit)
         if handle_signals:
             _install_signal_exit()
+
+    def __repr__(self):
+        return f"<drums.Client {_origin_text(self.url)} auth={self._cred.kind}>"   # never the key or the token
 
     # cleanup ----------------------------------------------------------------------------------------------------------
     def _own(self, env_id):
@@ -262,19 +544,50 @@ class Client:
         self.close()
 
     # transport --------------------------------------------------------------------------------------------------------
+    def _use_certifi(self, origin: str | None = None) -> bool:
+        """Switch this client to certifi's CA bundle (once; the gateway and the token exchange share it). False when
+        certifi is missing or already in use. `origin` is the server whose certificate failed (default: the gateway)."""
+        if self._certifi:
+            return False
+        ctx = _certifi_context()
+        if ctx is None:
+            return False
+        self._certifi_ctx = ctx
+        self._opener = self._build_opener(self.token)
+        self._certifi = True
+        sys.stderr.write(f"drums: the system certificate store could not verify {origin or _origin_text(self.url)}; using certifi's CA bundle "
+                         "(to fix Python's own store on macOS, run \"Install Certificates.command\")\n")
+        return True
+
+    def _build_opener(self, token: str | None):
+        """An opener with the same-origin redirect policy for `token`, and certifi's bundle once the client uses it."""
+        handlers = [_RedirectPolicy(token, self.allow_insecure_http)]
+        if self._certifi_ctx is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=self._certifi_ctx))
+        return urllib.request.build_opener(*handlers)
+
     def call(self, method: str, path: str, body=None, raw: bool = False, timeout: float | None = None, headers: dict | None = None):
         """One request. GETs are retried while drumsd is unreachable (up to retry_s: a restarting drumsd comes back and
-        reconciles); other methods are never retried, since their outcome is unknown after a dropped connection.
+        reconciles); other methods are not retried after a dropped connection, since their outcome is unknown.
+        A 429 (rate limited, or no capacity right now: nothing was started) is retried for every method by
+        `self.retry` (RetryPolicy), waiting at least the reply's Retry-After. A failed TLS certificate check is
+        retried once with certifi's CA bundle when certifi is installed (the handshake failed before anything was
+        sent), else raises CertificateError with the fix.
         `headers` are added to the request (e.g. Idempotency-Key). A redirect is followed only to the same origin
         (scheme, host, port), at most MAX_REDIRECTS hops; any other redirect raises RedirectRefused unfollowed."""
         data = None if body is None else json.dumps(body).encode()
         headers = {"Content-Type": "application/json", **(headers or {})}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
         deadline = time.monotonic() + (self.retry_s if method == "GET" else 0.0)
         delay = 0.25
+        policy = self.retry
+        waited_429, attempt_429 = 0.0, 0
+        renewed = False
         while True:
+            bearer = self._cred.bearer(self)
+            if bearer:
+                headers["Authorization"] = f"Bearer {bearer}"
             req = urllib.request.Request(self.url + path, data=data, method=method, headers=headers)
+            pause = delay
             try:
                 with self._opener.open(req, timeout=timeout or self.timeout) as r:
                     b = r.read()
@@ -286,8 +599,23 @@ class Client:
                     msg = body_j.get("error", text) if isinstance(body_j, dict) else text
                 except ValueError:
                     body_j, msg = None, text
+                ra = _retry_after(e.headers)
+                if e.code == 429 and policy is not None and attempt_429 < policy.max_attempts:
+                    w = policy.wait(attempt_429, ra)
+                    if waited_429 + w <= policy.max_wait_s:
+                        attempt_429 += 1
+                        waited_429 += w
+                        time.sleep(w)
+                        continue
+                if e.code == 401 and (self._cred.using_token or self._cred.undiscovered) and not renewed:
+                    # the token expired, was revoked or its signing key rotated, or the key went out before the
+                    # gateway's auth mode was known (a token-mode gateway refuses keys): discover and exchange once
+                    # more (a 401 is refused before anything ran, so even a POST is safe to send again)
+                    renewed = True
+                    self._cred.invalidate()
+                    continue
                 if e.code == 503 and time.monotonic() < deadline:
-                    pass
+                    pause = max(delay, min(ra, max(0.0, deadline - time.monotonic()))) if ra is not None else delay
                 else:
                     cls = _STATUS.get(e.code, DrumsError)
                     if e.code == 409 and isinstance(body_j, dict) and body_j.get("code") == "not_quiescent":
@@ -298,12 +626,21 @@ class Client:
                         cls = TaskUnsupported
                     if e.code == 409 and "slot is destroyed" in str(msg):      # drumsd < 0.4.2
                         cls = EnvGone
-                    raise cls(e.code, msg, body_j) from None
+                    err = cls(e.code, msg, body_j)
+                    err.retry_after = ra
+                    if e.code == 429:
+                        err.retries = attempt_429
+                    raise err from None
             except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+                if _is_cert_failure(e):
+                    if self._use_certifi():
+                        continue
+                    raise CertificateError(_origin_text(self.url), str(getattr(e, "reason", e)),
+                                           "certifi's bundle could not verify it either" if self._certifi else _CERT_HINT) from None
                 if time.monotonic() >= deadline:
                     what = "the outcome is unknown; call env.refresh()" if method != "GET" else f"retried for {self.retry_s:.0f} s"
                     raise DaemonUnavailable(0, f"drumsd at {self.url} unreachable on {method} {path} ({what}): {getattr(e, 'reason', e)}") from None
-            time.sleep(delay)
+            time.sleep(pause)
             delay = min(delay * 2, 2.0)
 
     # daemon -----------------------------------------------------------------------------------------------------------
@@ -376,9 +713,42 @@ class Client:
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         return self.call("POST", "/v1/runs", spec, headers=headers)
 
-    def run(self, run_id: str) -> dict:
+    def get_run(self, run_id: str) -> dict:
         """One run (GET /v1/runs/{id}): its row, the attempts summary and the last events."""
         return self.call("GET", f"/v1/runs/{urllib.parse.quote(str(run_id))}")
+
+    def open_run(self, name: str, kind: str = "training", *, task_set=None, config=None, flush_s: float = 30.0,
+                 strict: bool = False, label: str | None = None, desktops_provisioned: int | None = None) -> "Run":
+        """A Run (drums.runs.Run): `with client.open_run(name, kind="training", task_set=..., config=...) as run:` opens
+        it on the gateway, `run.step(step, reward=..., zero_advantage_share=..., rollouts=..., desktops_busy=...)`
+        records a point (sent at most once per `flush_s` s), and the block's end closes it (failed when the block
+        raised). Desktops created while it is open carry its label (the one the gateway's open reply names).
+        `desktops_provisioned` is sent on open (and step() takes its own). On a gateway without run routes it is a
+        no-op with one warning (strict=True raises instead); a 409 on a heartbeat or close means the run ended on
+        the gateway, and the SDK stops sending for it."""
+        return Run(self, name, kind, task_set=task_set, config=config, flush_s=flush_s, strict=strict, label=label,
+                   desktops_provisioned=desktops_provisioned)
+
+    def run(self, name_or_id: str, kind: str | None = None, **kw):
+        """`client.run(name, kind="training", task_set=..., config=...)` -> a Run to use as a context manager
+        (see open_run). `client.run(run_id)` with a run UUID and nothing else is the 0.3 call: the run's record
+        (GET /v1/runs/{id}, also `get_run`)."""
+        if kind is None and not kw and _runs.is_uuid(name_or_id):
+            return self.get_run(name_or_id)
+        return self.open_run(name_or_id, kind or "training", **kw)
+
+    def _push_run(self, run):
+        self._runs.append(run)
+
+    def _pop_run(self, run):
+        try:
+            self._runs.remove(run)
+        except ValueError:
+            pass
+
+    def _run_headers(self) -> dict | None:
+        runs = self._runs
+        return runs[-1].headers() if runs else None
 
     def api_keys(self) -> dict:
         """The workspace's API keys, metadata only (GET /v1/api-keys): {"items": [{id, name, prefix, scopes, ...}]}."""
@@ -428,7 +798,7 @@ class Client:
             body["idle_timeout_s"] = idle_timeout
         if ttl is not None:
             body["ttl_s"] = ttl
-        e = Env(self, self.call("POST", "/v1/slots", body))
+        e = Env(self, self.call("POST", "/v1/slots", body, headers=self._run_headers()))
         self._own(e.record.get("id"))
         e._check_up()
         return e
@@ -878,3 +1248,8 @@ def env(task: dict | None = None, *, from_state: str | None = None, checkpoint: 
     e = Env(c, rec)
     e._check_up()
     return e
+
+
+from ._preflight import PreflightReport, preflight  # noqa: E402  (needs Client defined above)
+
+__all__ += ["preflight", "PreflightReport"]

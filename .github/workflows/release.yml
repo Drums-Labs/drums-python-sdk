@@ -65,7 +65,8 @@ jobs:
   test:
     name: test the wheel on ${{ matrix.python }}
     needs: build
-    runs-on: ubuntu-latest
+    # ubuntu-latest (26.04) has no Python 3.9 build; 24.04 still has every version the SDK supports.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

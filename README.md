@@ -86,6 +86,37 @@ Use a score only when `valid` is `True`. With the default `strict=True`, `verify
 for an invalid episode instead of returning a reward. A `401` raises `drums.AuthError`: the key is mistyped,
 revoked or expired. The full walkthrough is the [docs quickstart](https://docs.drums.run/quickstart).
 
+## Preflight: can this run start?
+
+Before you pay for GPUs, check that the gateway, your key and your workspace can carry the run:
+
+```bash
+drums preflight --desktops 128 --hours 3 --task-set <task set id or name> [--model-gpus 2:6] [--json]
+```
+
+```python
+report = drums.preflight(desktops=128, hours=3, task_set=task_set_id)
+print(report.table()); assert report.ok
+```
+
+| Check | Passes when |
+|---|---|
+| gateway | `GET /v1/health` answers, in under 2 s (over 20 s fails: the control plane is overloaded) |
+| console | the console answers (by default the console that issues desktop tokens, else `console.drums.run`) |
+| auth | the key is accepted, not revoked, and does not expire before the run ends; on a gateway in desktop-token mode, the console issued a token for it (`both` mode on the key alone is a warning) |
+| scopes | `computers:read` and `computers:write` (required; `computers:write` also opens runs); `usage:read` (warned: `GET /v1/limits` needs it) |
+| host capacity, admission | the bound host has N free desktops, drumsd is ok, the host takes creates and no image checkpoint is stale |
+| rate limit | the per-key limit is at least N x 0.5 requests/s with a burst of N (the D1 rule: about 0.5 requests per second per active desktop, `drums._preflight.REQUESTS_PER_DESKTOP_S`) |
+| quota | the workspace's live-desktop limit leaves room for N |
+| spend cap | spent + N x H x the desktop-hour price stays under the cap |
+| task set | registered for the workspace and validated on a host (oracle accepted, none rejected) |
+
+Every row that is not a pass says how to fix it and links the console page (`--workspace <slug>` or `DRUMS_WORKSPACE`
+fills in the workspace). The exit status is 1 when a check failed, 0 otherwise; `--strict` also fails on a warning or
+on a row that could not be checked. Rate limit, quota and spend cap come from the gateway's `GET /v1/limits` summary
+(scope `usage:read`); a gateway that does not serve it yet says so on those rows ("not checked") instead of guessing,
+and `--desktop-hour-usd` supplies the price for the cost projection. Preflight only reads; it creates nothing.
+
 ## How it works
 
 ```mermaid
@@ -115,8 +146,27 @@ save is *capture* and fork is *branch*. They are the same things.
   30 minutes unused), so a crashed trainer does not hold a host.
 - **Validity.** Every episode starts with a gate report (isolation, mounts, network, limits, state hash, processes
   alive after resume). `Reward.valid` is `True` only when every gate passed and the computer was never quarantined.
-- **Retries.** GET requests are retried while the server is unreachable (up to `retry_s`, default 60 s). POST and
-  DELETE are never retried: after a lost reply the outcome is unknown, so check `client.envs()` before trying again.
+- **Retries.** GET requests are retried while the server is unreachable (up to `retry_s`, default 60 s). After a
+  lost reply to a POST or DELETE the outcome is unknown, so those are not retried; check `client.envs()` before
+  trying again. A 429 (the per-key rate limit, or no capacity right now) means nothing was started, so every call
+  (step, screenshot, verify, create, fork, ...) is retried, waiting at least the reply's `Retry-After` with jittered
+  backoff, for at most 60 s of waiting per call: `drums.RetryPolicy(max_wait_s=..., max_attempts=..., base_s=...,
+  cap_s=..., jitter=...)`, passed as `connect(..., retry=...)`. `RetryPolicy(max_wait_s=0)` or
+  `DRUMS_RETRY_MAX_WAIT_S=0` turns it off. `drums mcp` waits at most 10 s, so a chat turn does not hang.
+- **Certificates.** python.org's macOS Python has no root certificates until you run `Install Certificates.command`
+  (in `/Applications/Python 3.x/`), so the first HTTPS call fails with `CERTIFICATE_VERIFY_FAILED` even though
+  `curl` works. When the system store cannot verify the server and `certifi` is installed (`pip install certifi`),
+  the client retries once with certifi's CA bundle and prints one line saying so; without certifi it raises
+  `CertificateError` with the same fix. The token exchange below shares the fallback.
+- **Desktop tokens.** `drums.connect(url, key)` is unchanged. With a Drums API key (`drums_sk_...`) the client asks
+  the gateway once how it authenticates (`GET <url>/auth`, no credential sent). When the gateway says `token` or
+  `both`, the key goes once to the console's token URL and the gateway only ever receives the short-lived desktop
+  token, so the data path does not need the control-plane database. The token is renewed before it expires and once
+  after a 401. The exchange uses the same retry policy (a 429 waits for its `Retry-After`; in `token` mode a 5xx or a
+  dropped connection is retried too) and the same HTTPS and redirect rules as every other call. In `both` mode a
+  console that does not answer falls back to the key; in `token` mode it raises `DaemonUnavailable` naming the
+  console. A plain `drumsd`, a drumsd token or a gateway in `api_key` mode work exactly as before. Neither the key
+  nor the token appears in a repr or an error.
 
 ## Computers
 
@@ -203,17 +253,54 @@ page = client.runs(kind="scripted_test", status="completed", limit=20)
 for run in page["items"]:
     print(run["id"], run["status"], run.get("stop_reason"))
 
-run = client.run(page["items"][0]["id"])            # status, counts and events of one run
+run = client.get_run(page["items"][0]["id"])        # status, counts and events of one run (also client.run(<uuid>))
 new = client.create_run(spec, idempotency_key="nightly-2026-11-13")   # spec: the request the console shows
 ```
+
+### Your own training loop as a run
+
+A trainer that drives desktops itself (prime-rl, verifiers, your own loop) opens a run object, so the console shows
+the run (task set, config hash, steps, reward, zero-advantage share, rollouts, desktops busy, cost) instead of a list
+of anonymous computers:
+
+```python
+with client.run("qwen27b-d2", kind="training", task_set=task_set_id, config=cfg, desktops_provisioned=128) as run:
+    for step in range(num_steps):
+        ...                                                         # your rollouts and optimizer step
+        run.step(step, reward=mean_reward, zero_advantage_share=zero_adv, rollouts=n, desktops_busy=busy)
+```
+
+- `kind` is `training` (or `rl`) or `evaluation` (or `eval`). `desktops_provisioned` is shown against
+  `desktops_busy` on the run page, so idle desktops are visible; `run.step()` takes its own `desktops_provisioned=`
+  too.
+
+- `run.step()` only records the point; the points are sent at most once per 30 s (`flush_s=`) and once more on close.
+- The block's end closes the run: `completed`, `failed` with the exception's text if the block raised, `cancelled`
+  on Ctrl-C. A process that exits with the run still open closes it as `failed` (bounded to 10 s).
+- Desktops created while the run is open carry its label (`X-Drums-Run-Label`, and `X-Drums-Run-Id`; fork children
+  inherit it), so the Computers page can filter them by run. The label is the run's name, or the one the gateway's
+  open reply names (`run.label`) when another running run already holds that name.
+- `config` goes up as is when it is a JSON object of at most 16 KiB. Otherwise only its `config_hash` (sha256 of
+  its canonical JSON) and a `config_summary` (its scalar top-level values) are sent, with one warning.
+- A 400 on open is the gateway refusing that body: one warning with the gateway's message, `run.id` stays None, and
+  training goes on (`strict=True` raises `BadRequest`). Only a 404 or 405 means the gateway has no run routes.
+- A 409 on a heartbeat or on close means the run has ended on the gateway (closed elsewhere, or marked lost after
+  30 min without a heartbeat). The SDK stops sending for it with one warning (`run.ended` says why); training goes on.
+- On a gateway without the run routes (`POST /v1/runs` for training runs, `PATCH /v1/runs/{id}`,
+  `POST /v1/runs/{id}/close`), or with a key that has neither `runs:write` nor `computers:write`, the run is a no-op
+  with one warning and training goes on; `strict=True` raises `drums.RunNotSupported` instead. The labels still apply.
 
 Runs, evaluations, API keys and the audit log exist on the Drums gateway only; against a plain `drumsd` these
 methods raise `drums.NotFound`. Concepts: [runs and evaluations](https://docs.drums.run/concepts/runs-and-evaluations).
 
 ## MCP
 
-Drums publishes one MCP server with 34 tools: the workspace (computers, snapshots, tasks, runs, API keys, audit log)
-and the desktop itself (GUI, screenshot, shell, files, verify, fork, reset). Two ways to reach it:
+Drums publishes one MCP server with 36 tools: the workspace (computers, snapshots, tasks, task sets, runs, API keys,
+audit log) and the desktop itself (GUI, screenshot, shell, files, verify, fork, reset). `create_computer` and
+`load_task` take your own tasks too: `task` (a whole task document, as an object or a JSON string), `task_set_id` +
+`task_id` (a task of a set registered in the console or with `POST /v1/task-sets`; `list_task_sets` and
+`get_task_set` find them), or `task_id` alone (an OSWorld task). `verify` on a computer with no task says so. Two ways
+to reach it:
 
 | Transport | Where it runs | Address |
 |---|---|---|
@@ -322,8 +409,9 @@ reply), `message` and `body`. Errors about a computer carry its record and gate 
 | `Conflict` | 409: the computer's state does not allow this operation |
 | `NotQuiescent` | 409: fork or save found no safe moment to capture; nothing was captured |
 | `CheckpointStale` | 409: the template's checkpoint predates this runtime; the installer must run again |
-| `Overloaded` | 429: the host is near its memory limit; nothing was started, try again later |
+| `Overloaded` | 429: rate limited, host full or near its memory limit; nothing was started. Raised after the retries ran out (`retry_after`, `retries`) |
 | `DaemonUnavailable` | the server did not answer; after a POST, call `env.refresh()` |
+| `CertificateError` | the server's TLS certificate could not be verified (`hint` says how to fix it); a subclass of `DaemonUnavailable` |
 | `GuestError` | 502: the desktop's guest did not answer or refused the action |
 | `ActionFailed` | the action ran and exited non-zero (`returncode`, `output`, `error`) |
 | `EnvFailed` | a create, reset or fork child did not come up ready (`record`, `gates`, `cause`) |
@@ -344,10 +432,11 @@ causes and fixes: [errors](https://docs.drums.run/reference/errors).
 | `DRUMS_TOKEN` | SDK, `drums mcp` | the API key (`drums_sk_...`); sent as `Authorization: Bearer` |
 | `DRUMS_TOKEN_FILE` | `drums mcp` | a file holding the token, read when `DRUMS_TOKEN` is unset; then `/etc/drums/token` |
 | `DRUMS_ALLOW_INSECURE_HTTP` | SDK, `drums mcp` | `1` sends the token over plain HTTP to a host that is not loopback |
+| `DRUMS_RETRY_MAX_WAIT_S` | SDK, `drums mcp` | seconds a call may spend waiting out 429 replies (default 60; `drums mcp` 10); `0` turns the retries off |
 | `DRUMSD_URL` | SDK | older name for `DRUMS_URL`, read when `DRUMS_URL` is unset |
 
 `drums.connect(url, token, timeout=900, retry_s=60, check=True, close_on_exit=True, handle_signals=True,
-allow_insecure_http=None)` takes the same values as arguments. In CI, store the key in the secret store and expose
+allow_insecure_http=None, retry=None)` takes the same values as arguments. In CI, store the key in the secret store and expose
 it only as `DRUMS_TOKEN` to the job that needs it ([API keys guide](https://docs.drums.run/guides/api-keys)).
 
 ## Development
@@ -370,6 +459,22 @@ python3 -m twine check --strict dist/*
 ```
 
 Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+
+## Upgrading from 0.3
+
+Nothing breaks: every 0.3 call keeps its signature and meaning, and no dependency is added. What changes when you
+upgrade to 0.4.0:
+
+- **429 replies are retried** (up to 60 s of waiting per call, honouring `Retry-After`) instead of raising at once.
+  If your trainer has its own backoff around `Overloaded`, keep it or set `DRUMS_RETRY_MAX_WAIT_S=0` for the 0.3
+  behaviour.
+- **Desktop tokens** are used by themselves when the gateway asks for them; keep passing your API key as before.
+- **New:** `client.run(name, kind="training", ...)` (your training loop as a run in the console),
+  `drums preflight` / `drums.preflight(...)`, `drums.RetryPolicy`, `drums.CertificateError`, `drums.RunNotSupported`,
+  and in `drums mcp` custom tasks by `task_set_id` + `task_id` plus `list_task_sets` and `get_task_set`.
+- `client.run(<run uuid>)` with nothing else still returns the run's record, as in 0.3.
+
+Details per change: [CHANGELOG.md](CHANGELOG.md).
 
 ## Versioning and changelog
 

@@ -3,6 +3,76 @@
 All notable changes to the `drums` Python SDK. The SDK talks to drumsd over its HTTP API; the drumsd version each
 SDK version was built against is noted where it matters.
 
+## 0.4.0 - unreleased (proposed; not on PyPI)
+
+Post-D1 fixes for training clients (audit 2026-11-16), integrated in one release. Minor version: new API and one
+behaviour change (429 replies are retried, with an off switch); nothing is removed and no dependency is added. Every
+0.3 call keeps its signature and meaning. Built against drumsd 0.4.2 and the gateway routes of Drums-Labs/drums #41
+(trainer runs), #43 (desktop tokens), #46 (task-set tasks) and #49 (`GET /v1/limits`); against an older gateway each
+feature falls back as described below.
+
+### Changed
+
+- **429 replies are retried on every call** (A-29, #11). A 429 (the gateway's per-key rate limit, or no capacity
+  right now: nothing was started) is retried for every method, step, screenshot, verify, create and fork included,
+  waiting at least the reply's `Retry-After` (seconds or an HTTP date), with jittered exponential backoff, for at
+  most 60 s of waiting per call (or 20 retries). `drums.RetryPolicy(max_wait_s, max_attempts, base_s, cap_s, jitter)`
+  via `connect(..., retry=...)`; `DRUMS_RETRY_MAX_WAIT_S` sets the budget and `0` restores the 0.3.0 behaviour
+  (raise at once). `drums mcp` waits at most 10 s. `Overloaded` carries `retry_after` and `retries`. A GET that gets
+  a 503 honours `Retry-After`; a POST that gets a 503 is still never retried.
+
+### Added
+
+- **Desktop tokens** (A-30, #14; design note "control plane out of the data path", 3.1). `drums.connect(url, key)`
+  keeps its signature. With a Drums API key (`drums_sk_...`) the client asks the gateway once how it authenticates
+  (`GET <url>/auth`, no credential). When the gateway says `token` or `both`, the key is sent once to the console's
+  token URL (https, or loopback http; the same transport and redirect rules as every other request) and the gateway
+  only ever receives the short-lived desktop token. The token is renewed before it expires (the console's
+  `renew_after_s`, else 5 min before expiry) and once after a 401, then the call is sent again. The exchange and
+  every renewal use the client's `RetryPolicy` (a 429 waits for its `Retry-After`; in `token` mode, with no fallback,
+  a 5xx or a dropped connection is retried within the same budget) and the certifi fallback below. In `both` mode an
+  unreachable console falls back to the API key at once (and tries the exchange again after a minute); in `token`
+  mode it raises `DaemonUnavailable` naming the console, and a refused key raises `AuthError`. A key sent before the
+  gateway's mode was known (the discovery request got no answer) is retried once after a 401. A drumsd token, or a
+  gateway in `api_key` mode, works exactly as before. Neither the key nor the token appears in a repr
+  (`repr(client)` shows the auth kind only) or an error message.
+- **macOS certificates** (A-07, #11). When the system store cannot verify the gateway or the console and `certifi`
+  is installed, the client switches to certifi's CA bundle once (for both) and prints one line naming the server;
+  without certifi it raises the new `CertificateError` (a `DaemonUnavailable`) with the fix
+  (`Install Certificates.command` or `pip install certifi`). No new dependency.
+- **Run object** (A-36, #12, matching the gateway's trainer runs). `with client.run(name, kind="training",
+  task_set=..., config=..., desktops_provisioned=N) as run:` opens a run (`POST /v1/runs`),
+  `run.step(step, reward=, zero_advantage_share=, rollouts=, desktops_busy=, desktops_provisioned=)` buffers points
+  sent at most once per 30 s (`PATCH /v1/runs/{id}`), and the block's end closes it (`POST /v1/runs/{id}/close`:
+  completed, failed with the exception, cancelled on Ctrl-C). Kinds: `training`, `rl`, `evaluation`, `eval`.
+  Desktops created inside carry `X-Drums-Run-Label` (the label the open reply names, which differs from the name
+  when another running run holds it) and `X-Drums-Run-Id`. A 409 on a heartbeat or close means the run has ended on
+  the gateway (closed, or lost after 30 min without a heartbeat): the SDK stops sending for it with one warning
+  (`run.ended`). A `config` that is not a JSON object or is over 16 KiB as JSON is sent as its `config_hash` and a
+  `config_summary` (scalar top-level values), with one warning. A 400 on open warns with the gateway's message and
+  leaves `run.id` None; only a 404 or 405 means the routes are missing. On a gateway without these routes, or with a key that has neither `runs:write` nor
+  `computers:write`, it is a no-op with one warning (`strict=True` raises `RunNotSupported`).
+  `client.run(<run uuid>)` alone still returns the run's record; `get_run` and `open_run` are the explicit names.
+- **`drums preflight`** (#13). `drums preflight --desktops N --hours H [--model-gpus 2:6] [--task-set ID] [--json]`
+  and `drums.preflight(...)`: gateway and console health, key validity, expiry and scopes, host capacity and
+  admission, rate limit (N x 0.5 requests/s, the D1 rule, `REQUESTS_PER_DESKTOP_S`), live-desktop quota, spend cap at
+  the projected desktop-hour cost, and the task set's registration and validation. A pass/fail table with a fix and a
+  console link per row; exit 1 on a failure (`--strict`: also on a warning or a row it could not check). Works in
+  desktop-token mode: the exchange runs first, so a console that cannot issue a token is an auth failure (a `both`
+  gateway on the key alone is a warning), and the console row defaults to the token URL's origin. Rate limit, quota,
+  spend cap, price and host admission come from `GET /v1/limits` (scope `usage:read`, Drums-Labs/drums#49); a
+  gateway without it gets "not checked" on those rows.
+- **MCP custom tasks** (A-08, A-09, #15). `create_computer` and `load_task` take `task_set_id` + `task_id` (a task of
+  a registered set) besides `task` and `task_id`; a task document sent as a JSON string is accepted; new tools
+  `list_task_sets` and `get_task_set` (36 tools, the gateway's tools.json); `verify` on a computer with no task says
+  so. Needs the gateway route `GET /v1/task-sets/{id}/tasks/{task_id}` (Drums-Labs/drums#46).
+
+### CI
+
+- A `pip-audit` job on what CI installs, with an allowlist whose entries expire, and a weekly audit that opens an
+  issue on failure (A-40, #10).
+- The test matrix (3.9 to 3.13) runs on `ubuntu-24.04`: `ubuntu-latest` is 26.04, which has no Python 3.9 build.
+
 ## 0.3.0 - 2026-11-12
 
 The MCP server and the `drums` command. The hosted MCP endpoint on the gateway (`<gateway URL>/mcp`) is live already;

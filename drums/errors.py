@@ -5,6 +5,9 @@ from __future__ import annotations
 class DrumsError(Exception):
     """Base class. `status` is the HTTP status (0 when no reply), `message` the server's error text."""
 
+    #: seconds the server asked the client to wait (its Retry-After header), when the reply had one
+    retry_after = None
+
     def __init__(self, status: int, message: str, body=None):
         super().__init__(f"drumsd HTTP {status}: {message}" if status else message)
         self.status, self.message, self.body = status, message, body
@@ -75,9 +78,14 @@ class Conflict(DrumsError):
 
 
 class Overloaded(DrumsError):
-    """429 `overloaded`: drumsd refused a create, save or fork because the host is near its memory limit (or under
-    memory pressure, or the state tmpfs is nearly full). Nothing was started; try again later. `reason` is memory,
-    memory_pressure or state_space; `admission` has the numbers (available, in flight, needed, floor)."""
+    """429: nothing was started. From drumsd (`overloaded`): a create, save or fork was refused because the host is
+    near its memory limit (or under memory pressure, or the state tmpfs is nearly full); `reason` is memory,
+    memory_pressure or state_space and `admission` has the numbers (available, in flight, needed, floor). From the
+    gateway: `rate_limited` (the per-key request rate) or `overloaded` (host full, too many creates in flight).
+    The client already retried it under its RetryPolicy; `retry_after` is the server's last Retry-After (seconds)
+    and `retries` how many retries were made."""
+
+    retries = 0
 
     def __init__(self, status: int, message: str, body=None):
         super().__init__(status, message, body)
@@ -113,6 +121,17 @@ class CheckpointStale(Conflict):
 
 class DaemonUnavailable(DrumsError):
     """drumsd did not answer (down, restarting, network). For a POST the outcome is unknown: call env.refresh()."""
+
+
+class CertificateError(DaemonUnavailable):
+    """The server's TLS certificate could not be verified, so nothing was sent. Most often python.org's macOS Python,
+    which has no root certificates until "Install Certificates.command" runs; the client already retried with
+    certifi's CA bundle when certifi is installed. `origin` is scheme://host:port, `hint` the fix. A subclass of
+    DaemonUnavailable, so `except DaemonUnavailable` still catches it."""
+
+    def __init__(self, origin: str, reason: str, hint: str):
+        super().__init__(0, f"TLS certificate verification failed for {origin} ({reason}): {hint}")
+        self.origin, self.reason, self.hint = origin, reason, hint
 
 
 class GuestError(DrumsError):
