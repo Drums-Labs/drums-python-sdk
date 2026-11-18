@@ -57,7 +57,9 @@ DEFAULT_IMAGE = "osworld-ubuntu"
 __all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "ForkResult", "env", "__version__",
            "DrumsError", "AuthError", "BadRequest", "NotFound", "EnvGone", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
            "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded",
-           "CheckpointStale", "TaskUnsupported", "InsecureTransport", "RedirectRefused", "check_transport", "Run", "RunNotSupported"]
+           "CheckpointStale", "TaskUnsupported", "InsecureTransport", "RedirectRefused", "check_transport"]
+
+__all__ += ["Run", "RunNotSupported"]
 
 _STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 410: EnvGone, 422: BadRequest, 429: Overloaded, 502: GuestError,
            503: DaemonUnavailable}
