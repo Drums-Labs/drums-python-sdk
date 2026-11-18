@@ -59,6 +59,8 @@ import warnings
 from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CertificateError, CheckerError, CheckpointStale, Conflict, DaemonUnavailable, DrumsError, EnvFailed,  # noqa: F401
                      EnvGone, ForkError, GateFailed, GuestError, InsecureTransport, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RedirectRefused, RestoreFailed, TaskSetupFailed,
                      TaskUnsupported)
+from . import runs as _runs
+from .runs import Run, RunNotSupported
 
 __version__ = "0.3.0"
 DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or "http://127.0.0.1:7070"
@@ -68,6 +70,8 @@ __all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", 
            "DrumsError", "AuthError", "BadRequest", "NotFound", "EnvGone", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
            "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded",
            "CheckpointStale", "TaskUnsupported", "InsecureTransport", "RedirectRefused", "check_transport"]
+
+__all__ += ["Run", "RunNotSupported"]
 
 _STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 410: EnvGone, 422: BadRequest, 429: Overloaded, 502: GuestError,
            503: DaemonUnavailable}
@@ -410,6 +414,7 @@ class Client:
         self._cred = _Credentials(self.token)    # API key -> desktop token exchange when the gateway asks for it
         self._owned: dict[str, None] = {}          # ids of envs this client created and has not closed (insertion order)
         self._owned_lock = threading.Lock()
+        self._runs: list = []                      # open Run objects, innermost last: creates carry its label
         self.close_on_exit = close_on_exit
         if close_on_exit:
             atexit.register(self._close_at_exit)
@@ -639,9 +644,39 @@ class Client:
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         return self.call("POST", "/v1/runs", spec, headers=headers)
 
-    def run(self, run_id: str) -> dict:
+    def get_run(self, run_id: str) -> dict:
         """One run (GET /v1/runs/{id}): its row, the attempts summary and the last events."""
         return self.call("GET", f"/v1/runs/{urllib.parse.quote(str(run_id))}")
+
+    def open_run(self, name: str, kind: str = "training", *, task_set=None, config=None, flush_s: float = 30.0,
+                 strict: bool = False, label: str | None = None) -> "Run":
+        """A Run (drums.runs.Run): `with client.open_run(name, kind="training", task_set=..., config=...) as run:` opens
+        it on the gateway, `run.step(step, reward=..., zero_advantage_share=..., rollouts=..., desktops_busy=...)`
+        records a point (sent at most once per `flush_s` s), and the block's end closes it (failed when the block
+        raised). Desktops created while it is open carry its label. On a gateway without run routes it is a no-op
+        with one warning (strict=True raises instead)."""
+        return Run(self, name, kind, task_set=task_set, config=config, flush_s=flush_s, strict=strict, label=label)
+
+    def run(self, name_or_id: str, kind: str | None = None, **kw):
+        """`client.run(name, kind="training", task_set=..., config=...)` -> a Run to use as a context manager
+        (see open_run). `client.run(run_id)` with a run UUID and nothing else is the 0.3 call: the run's record
+        (GET /v1/runs/{id}, also `get_run`)."""
+        if kind is None and not kw and _runs.is_uuid(name_or_id):
+            return self.get_run(name_or_id)
+        return self.open_run(name_or_id, kind or "training", **kw)
+
+    def _push_run(self, run):
+        self._runs.append(run)
+
+    def _pop_run(self, run):
+        try:
+            self._runs.remove(run)
+        except ValueError:
+            pass
+
+    def _run_headers(self) -> dict | None:
+        runs = self._runs
+        return runs[-1].headers() if runs else None
 
     def api_keys(self) -> dict:
         """The workspace's API keys, metadata only (GET /v1/api-keys): {"items": [{id, name, prefix, scopes, ...}]}."""
@@ -691,7 +726,7 @@ class Client:
             body["idle_timeout_s"] = idle_timeout
         if ttl is not None:
             body["ttl_s"] = ttl
-        e = Env(self, self.call("POST", "/v1/slots", body))
+        e = Env(self, self.call("POST", "/v1/slots", body, headers=self._run_headers()))
         self._own(e.record.get("id"))
         e._check_up()
         return e
