@@ -419,6 +419,9 @@ def _task_set_check(client, task_set: str, lim, links, timeout) -> Check:
     link = links.page(f"tasks/{tid}", "Tasks")
     v = ts.get("validation") if isinstance(ts.get("validation"), dict) else None
     name = f"{ts.get('name') or tid} ({ts.get('task_count', '?')} tasks)"
+    if not v and ts.get("platform"):
+        return Check("task set", WARN, f"{name} is a platform set with no validation record for this host",
+                     "validate the tasks you train on (oracle 1.0, near misses 0.0) before a long run", link)
     if not v:
         return Check("task set", FAIL, f"{name} is registered but was never validated on a host",
                      "run the validator on the host (oracle 1.0 and every near miss 0.0) and register the result", link)

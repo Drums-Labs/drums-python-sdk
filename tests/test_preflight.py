@@ -199,6 +199,8 @@ class Preflight(unittest.TestCase):
         c = self.row(self.pre(8, task_set=TS), "task set")
         self.assertEqual(c.status, "fail")
         self.assertIn("never validated", c.detail)
+        Gw.state = {"task_set": {**VALID_SET, "validation": None, "platform": True}}
+        self.assertEqual(self.row(self.pre(8, task_set=TS), "task set").status, "warn")             # e.g. the OSWorld set
         Gw.state = {"task_set": {**VALID_SET, "validation": {**VALID_SET["validation"], "rejected": 2}}}
         self.assertEqual(self.row(self.pre(8, task_set=TS), "task set").status, "fail")
         Gw.state = {"task_set": VALID_SET}

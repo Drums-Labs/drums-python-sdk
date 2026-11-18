@@ -86,6 +86,37 @@ Use a score only when `valid` is `True`. With the default `strict=True`, `verify
 for an invalid episode instead of returning a reward. A `401` raises `drums.AuthError`: the key is mistyped,
 revoked or expired. The full walkthrough is the [docs quickstart](https://docs.drums.run/quickstart).
 
+## Preflight: can this run start?
+
+Before you pay for GPUs, check that the gateway, your key and your workspace can carry the run:
+
+```bash
+drums preflight --desktops 128 --hours 3 --task-set <task set id or name> [--model-gpus 2:6] [--json]
+```
+
+```python
+report = drums.preflight(desktops=128, hours=3, task_set=task_set_id)
+print(report.table()); assert report.ok
+```
+
+| Check | Passes when |
+|---|---|
+| gateway | `GET /v1/health` answers, in under 2 s (over 20 s fails: the control plane is overloaded) |
+| console | the console answers |
+| auth | the key is accepted, not revoked, and does not expire before the run ends |
+| scopes | `computers:read` and `computers:write` (required); `runs:write` and `usage:read` (warned) |
+| host capacity, admission | the bound host has N free desktops, drumsd is ok and no image checkpoint is stale |
+| rate limit | the per-key limit is at least N x 0.5 requests/s with a burst of N (the D1 rule: about 0.5 requests per second per active desktop, `drums._preflight.REQUESTS_PER_DESKTOP_S`) |
+| quota | the workspace's live-desktop limit leaves room for N |
+| spend cap | spent + N x H x the desktop-hour price stays under the cap |
+| task set | registered for the workspace and validated on a host (oracle accepted, none rejected) |
+
+Every row that is not a pass says how to fix it and links the console page (`--workspace <slug>` or `DRUMS_WORKSPACE`
+fills in the workspace). The exit status is 1 when a check failed, 0 otherwise; `--strict` also fails on a warning or
+on a row that could not be checked. Rate limit, quota and spend cap need the gateway's `GET /v1/limits` summary; a
+gateway without it says so on those rows ("not checked") instead of guessing, and `--desktop-hour-usd` supplies the
+price for the cost projection. Preflight only reads; it creates nothing.
+
 ## How it works
 
 ```mermaid
