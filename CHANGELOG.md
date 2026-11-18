@@ -3,7 +3,7 @@
 All notable changes to the `drums` Python SDK. The SDK talks to drumsd over its HTTP API; the drumsd version each
 SDK version was built against is noted where it matters.
 
-## 0.4.0 - unreleased (proposed; not on PyPI)
+## 0.4.0 - 2026-11-18
 
 Post-D1 fixes for training clients (audit 2026-11-16), integrated in one release. Minor version: new API and one
 behaviour change (429 replies are retried, with an off switch); nothing is removed and no dependency is added. Every
