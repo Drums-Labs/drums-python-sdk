@@ -184,6 +184,7 @@ class Redirecting(BaseHTTPRequestHandler):
     """A loopback server that redirects: every request is recorded as (path, headers). Location targets are built
     from the query-free path; `remote_port` is a second loopback listener that must never see a connection."""
     requests = []
+    probes = []           # GET /auth: the SDK's credential-free discovery of the gateway's auth mode (kept apart)
     remote_port = 0
 
     def log_message(self, *a):
@@ -203,6 +204,12 @@ class Redirecting(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def do_GET(self):
+        if self.path == "/auth":
+            Redirecting.probes.append(dict(self.headers))
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         Redirecting.requests.append((self.path, dict(self.headers)))
         host = f"127.0.0.1:{self.server.server_address[1]}"
         p = self.path
@@ -283,6 +290,13 @@ class Redirects(unittest.TestCase):
         self.assertIsInstance(cm.exception, drums.DrumsError)
         self.assertEqual(len(Redirecting.requests), 1, "only the first request was made")
         return cm.exception
+
+    def test_auth_discovery_probe_never_carries_the_key(self):
+        Redirecting.probes = []
+        self.client.call("GET", "/landed")
+        self.client.call("GET", "/landed")
+        self.assertEqual(len(Redirecting.probes), 1, "discovered once per client")
+        self.assertNotIn("Authorization", Redirecting.probes[0])
 
     def test_cross_host_redirect_is_refused_unfollowed(self):
         self.assert_refused("/to-remote-host", "HTTP 302", "http://example.com:80", "127.0.0.1")
