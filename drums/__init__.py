@@ -67,7 +67,7 @@ DEFAULT_IMAGE = "osworld-ubuntu"
 __all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "ForkResult", "env", "__version__",
            "DrumsError", "AuthError", "BadRequest", "NotFound", "EnvGone", "Conflict", "DaemonUnavailable", "GuestError", "EnvFailed",
            "RestoreFailed", "GateFailed", "TaskSetupFailed", "ForkError", "BatchError", "InvalidEpisode", "CheckerError", "NotQuiescent", "Overloaded",
-           "CheckpointStale", "TaskUnsupported", "InsecureTransport", "RedirectRefused", "check_transport", "RetryPolicy", "CertificateError"]
+           "CheckpointStale", "TaskUnsupported", "InsecureTransport", "RedirectRefused", "check_transport"]
 
 _STATUS = {400: BadRequest, 401: AuthError, 404: NotFound, 409: Conflict, 410: EnvGone, 422: BadRequest, 429: Overloaded, 502: GuestError,
            503: DaemonUnavailable}
@@ -191,6 +191,9 @@ class RetryPolicy:
     def __repr__(self):
         return (f"RetryPolicy(max_wait_s={self.max_wait_s}, max_attempts={self.max_attempts}, base_s={self.base_s}, "
                 f"cap_s={self.cap_s}, jitter={self.jitter})")
+
+
+__all__ += ["RetryPolicy", "CertificateError"]
 
 
 def _retry_after(headers) -> float | None:
