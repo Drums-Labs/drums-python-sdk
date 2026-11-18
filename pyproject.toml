@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "drums-sdk"
-version = "0.3.0"
+version = "0.4.0"
 # Distribution name drums-sdk (PyPI rejects "drums" as too similar to an existing project); import name: drums.
 description = "Drums SDK: isolated desktop environments for computer-use RL. Create a desktop, act, screenshot, fork, verify."
 readme = "README.md"

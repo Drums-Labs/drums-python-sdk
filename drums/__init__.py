@@ -48,7 +48,7 @@ from .errors import (ActionFailed, AuthError, BadRequest, BatchError, CheckerErr
                      EnvGone, ForkError, GateFailed, GuestError, InsecureTransport, InvalidEpisode, NotFound, NotQuiescent, Overloaded, RedirectRefused, RestoreFailed, TaskSetupFailed,
                      TaskUnsupported)
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or "http://127.0.0.1:7070"
 DEFAULT_IMAGE = "osworld-ubuntu"
 
