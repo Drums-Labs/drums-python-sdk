@@ -102,10 +102,10 @@ print(report.table()); assert report.ok
 | Check | Passes when |
 |---|---|
 | gateway | `GET /v1/health` answers, in under 2 s (over 20 s fails: the control plane is overloaded) |
-| console | the console answers |
-| auth | the key is accepted, not revoked, and does not expire before the run ends |
-| scopes | `computers:read` and `computers:write` (required); `runs:write` and `usage:read` (warned) |
-| host capacity, admission | the bound host has N free desktops, drumsd is ok and no image checkpoint is stale |
+| console | the console answers (by default the console that issues desktop tokens, else `console.drums.run`) |
+| auth | the key is accepted, not revoked, and does not expire before the run ends; on a gateway in desktop-token mode, the console issued a token for it (`both` mode on the key alone is a warning) |
+| scopes | `computers:read` and `computers:write` (required; `computers:write` also opens runs); `usage:read` (warned: `GET /v1/limits` needs it) |
+| host capacity, admission | the bound host has N free desktops, drumsd is ok, the host takes creates and no image checkpoint is stale |
 | rate limit | the per-key limit is at least N x 0.5 requests/s with a burst of N (the D1 rule: about 0.5 requests per second per active desktop, `drums._preflight.REQUESTS_PER_DESKTOP_S`) |
 | quota | the workspace's live-desktop limit leaves room for N |
 | spend cap | spent + N x H x the desktop-hour price stays under the cap |
@@ -113,9 +113,9 @@ print(report.table()); assert report.ok
 
 Every row that is not a pass says how to fix it and links the console page (`--workspace <slug>` or `DRUMS_WORKSPACE`
 fills in the workspace). The exit status is 1 when a check failed, 0 otherwise; `--strict` also fails on a warning or
-on a row that could not be checked. Rate limit, quota and spend cap need the gateway's `GET /v1/limits` summary; a
-gateway without it says so on those rows ("not checked") instead of guessing, and `--desktop-hour-usd` supplies the
-price for the cost projection. Preflight only reads; it creates nothing.
+on a row that could not be checked. Rate limit, quota and spend cap come from the gateway's `GET /v1/limits` summary
+(scope `usage:read`); a gateway that does not serve it yet says so on those rows ("not checked") instead of guessing,
+and `--desktop-hour-usd` supplies the price for the cost projection. Preflight only reads; it creates nothing.
 
 ## How it works
 
@@ -157,7 +157,16 @@ save is *capture* and fork is *branch*. They are the same things.
   (in `/Applications/Python 3.x/`), so the first HTTPS call fails with `CERTIFICATE_VERIFY_FAILED` even though
   `curl` works. When the system store cannot verify the server and `certifi` is installed (`pip install certifi`),
   the client retries once with certifi's CA bundle and prints one line saying so; without certifi it raises
-  `CertificateError` with the same fix.
+  `CertificateError` with the same fix. The token exchange below shares the fallback.
+- **Desktop tokens.** `drums.connect(url, key)` is unchanged. With a Drums API key (`drums_sk_...`) the client asks
+  the gateway once how it authenticates (`GET <url>/auth`, no credential sent). When the gateway says `token` or
+  `both`, the key goes once to the console's token URL and the gateway only ever receives the short-lived desktop
+  token, so the data path does not need the control-plane database. The token is renewed before it expires and once
+  after a 401. The exchange uses the same retry policy (a 429 waits for its `Retry-After`; in `token` mode a 5xx or a
+  dropped connection is retried too) and the same HTTPS and redirect rules as every other call. In `both` mode a
+  console that does not answer falls back to the key; in `token` mode it raises `DaemonUnavailable` naming the
+  console. A plain `drumsd`, a drumsd token or a gateway in `api_key` mode work exactly as before. Neither the key
+  nor the token appears in a repr or an error.
 
 ## Computers
 
@@ -446,6 +455,22 @@ python3 -m twine check --strict dist/*
 ```
 
 Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+
+## Upgrading from 0.3
+
+Nothing breaks: every 0.3 call keeps its signature and meaning, and no dependency is added. What changes when you
+upgrade to 0.4.0:
+
+- **429 replies are retried** (up to 60 s of waiting per call, honouring `Retry-After`) instead of raising at once.
+  If your trainer has its own backoff around `Overloaded`, keep it or set `DRUMS_RETRY_MAX_WAIT_S=0` for the 0.3
+  behaviour.
+- **Desktop tokens** are used by themselves when the gateway asks for them; keep passing your API key as before.
+- **New:** `client.run(name, kind="training", ...)` (your training loop as a run in the console),
+  `drums preflight` / `drums.preflight(...)`, `drums.RetryPolicy`, `drums.CertificateError`, `drums.RunNotSupported`,
+  and in `drums mcp` custom tasks by `task_set_id` + `task_id` plus `list_task_sets` and `get_task_set`.
+- `client.run(<run uuid>)` with nothing else still returns the run's record, as in 0.3.
+
+Details per change: [CHANGELOG.md](CHANGELOG.md).
 
 ## Versioning and changelog
 
