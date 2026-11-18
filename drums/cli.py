@@ -2,6 +2,7 @@
 
     drums mcp [--env ID] [--url URL] [--create] [--task FILE]     # the MCP server on stdio (== python -m drums.mcp)
     drums mcp --print-config claude|claude-local|cursor|codex      # a client config snippet (placeholders, never a key)
+    drums preflight --desktops N --hours H [--model-gpus 2:6] [--task-set ID] [--json]   # can this run start? (exit 1: no)
     drums version
 """
 from __future__ import annotations
@@ -45,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="drums", description="Drums: isolated desktops for computer-use agents.")
     sub = ap.add_subparsers(dest="command", metavar="command")
     add_arguments(sub.add_parser("mcp", help="run the MCP server on stdio (or print a client config with --print-config)"))
+    from ._preflight import add_arguments as preflight_arguments
+    preflight_arguments(sub.add_parser("preflight", help="check that the gateway, key and workspace can carry N desktops for H hours"))
     sub.add_parser("version", help="print the SDK version")
     return ap
 
@@ -55,6 +58,9 @@ def main(argv=None) -> int:
     if a.command == "version":
         sys.stdout.write(f"drums {__version__}\n")
         return 0
+    if a.command == "preflight":
+        from ._preflight import run as preflight_run
+        return preflight_run(a, sys.stdout, sys.stderr)
     if a.command == "mcp":
         from .mcp import run
         return run(a)

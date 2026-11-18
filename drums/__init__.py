@@ -1176,3 +1176,8 @@ def env(task: dict | None = None, *, from_state: str | None = None, checkpoint: 
     e = Env(c, rec)
     e._check_up()
     return e
+
+
+from ._preflight import PreflightReport, preflight  # noqa: E402  (needs Client defined above)
+
+__all__ += ["preflight", "PreflightReport"]
