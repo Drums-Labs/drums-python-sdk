@@ -3,6 +3,19 @@
 All notable changes to the `drums` Python SDK. The SDK talks to drumsd over its HTTP API; the drumsd version each
 SDK version was built against is noted where it matters.
 
+## Unreleased
+
+- Desktop tokens (design note "control plane out of the data path", 3.1). `drums.connect(url, key)` keeps its
+  signature. With a Drums API key (`drums_sk_...`) the client asks the gateway once how it authenticates
+  (`GET <url>/auth`, no credential). When the gateway says `token` or `both`, the key is sent once to the console's
+  token URL (https, or loopback http; the same transport and redirect rules as every other request) and the gateway
+  only ever receives the short-lived desktop token. The token is renewed before it expires (the console's
+  `renew_after_s`, else 5 min before expiry) and once after a 401, then the call is sent again. In `both` mode an
+  unreachable console falls back to the API key (and tries the exchange again after a minute); in `token` mode it
+  raises `DaemonUnavailable`, and a refused key raises `AuthError`. A drumsd token, or a gateway in `api_key` mode,
+  works exactly as before. Neither the key nor the token appears in a repr (`repr(client)` shows the auth kind only)
+  or an error message.
+
 ## 0.3.0 - 2026-11-12
 
 The MCP server and the `drums` command. The hosted MCP endpoint on the gateway (`<gateway URL>/mcp`) is live already;

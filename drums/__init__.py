@@ -231,6 +231,128 @@ def _certifi_context():
 
 _CERT_HINT = ("python.org's macOS Python has no root certificates until you run \"Install Certificates.command\" "
               "(in /Applications/Python 3.x/); or `pip install certifi` and the SDK uses it automatically")
+API_KEY_PREFIX = "drums_sk_"
+TOKEN_RENEW_BEFORE_S = 300.0
+
+
+class _Credentials:
+    """The credential the caller passed and, when the gateway advertises desktop tokens, the token exchanged for it.
+
+    A Drums API key (`drums_sk_...`) given to a gateway in `token` or `both` mode (GET <url>/auth) is sent once to
+    the console's token URL; the gateway then gets only the short-lived desktop token, renewed before it expires (at
+    the console's `renew_after_s`, else 5 min before `expires_in`) and once after a 401. Any other credential (a drumsd
+    token) is sent as it is and nothing is discovered. Neither value is ever part of a repr, a log line or an error
+    message: errors name the origin and the HTTP status only."""
+
+    def __init__(self, key: str | None):
+        self._key = key
+        self._lock = threading.Lock()
+        self._mode = None if key and key.startswith(API_KEY_PREFIX) else "plain"
+        self._token_url = None
+        self._token = None
+        self._renew_at = 0.0
+        self._expires_at = 0.0
+        self._next_try = 0.0          # `both` mode with the console away: try the exchange again after this
+
+    def __repr__(self):
+        return f"<drums credentials: {self.kind}>"
+
+    __str__ = __repr__
+
+    @property
+    def kind(self) -> str:
+        if not self._key:
+            return "none"
+        if self._mode == "plain":
+            return "token"
+        if self._mode in ("token", "both"):
+            return "desktop token" if self._token else "api key (token exchange pending)"
+        return "api key"
+
+    @property
+    def using_token(self) -> bool:
+        return self._token is not None
+
+    def invalidate(self):
+        with self._lock:
+            self._token, self._renew_at, self._expires_at = None, 0.0, 0.0
+
+    def bearer(self, client) -> str | None:
+        """The value for `Authorization: Bearer`, exchanging or renewing the desktop token when needed."""
+        if not self._key:
+            return None
+        if self._mode == "plain":
+            return self._key
+        if self._mode is None:
+            self._discover(client)
+        if self._mode not in ("token", "both"):
+            return self._key
+        with self._lock:
+            now = time.time()
+            if self._token and now < self._renew_at:
+                return self._token
+            if not self._token and self._mode == "both" and now < self._next_try:
+                return self._key
+            try:
+                self._exchange(client, now)
+            except (AuthError, InsecureTransport, RedirectRefused):
+                raise
+            except DrumsError:
+                # renewal failed while the old token is still valid: keep using it until it expires
+                if self._token and now < self._expires_at - 30:
+                    return self._token
+                if self._mode == "both":        # the gateway still takes the API key; retry the exchange in a minute
+                    self._next_try = now + 60.0
+                    return self._key
+                raise
+            return self._token
+
+    def _discover(self, client):
+        """GET <url>/auth once (no credential). A definite answer is remembered; a network failure is not."""
+        req = urllib.request.Request(client.url + "/auth", method="GET", headers={"Accept": "application/json"})
+        try:
+            with client._opener.open(req, timeout=min(client.timeout, 15.0)) as r:
+                info = json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as e:
+            e.close()
+            self._mode = "api_key"              # drumsd, or a gateway without token support
+            return
+        except (RedirectRefused, urllib.error.URLError, ConnectionError, TimeoutError, OSError, ValueError):
+            return                              # unknown for now; the request itself will report the transport problem
+        mode = info.get("auth_mode") if isinstance(info, dict) else None
+        url = info.get("token_url") if isinstance(info, dict) else None
+        if mode in ("token", "both") and isinstance(url, str) and url:
+            check_transport(url, self._key, client.allow_insecure_http)
+            self._mode, self._token_url = mode, url
+        else:
+            self._mode = "api_key"
+
+    def _exchange(self, client, now: float):
+        url = self._token_url
+        origin = _origin_text(url)
+        opener = urllib.request.build_opener(_RedirectPolicy(self._key, client.allow_insecure_http))
+        req = urllib.request.Request(url, data=b"", method="POST",
+                                     headers={"Authorization": f"Bearer {self._key}", "Accept": "application/json", "Content-Length": "0"})
+        try:
+            with opener.open(req, timeout=min(client.timeout, 30.0)) as r:
+                body = json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as e:
+            status = e.code
+            e.close()
+            if status == 401:
+                raise AuthError(401, f"the console at {origin} refused the API key (missing, invalid, revoked or expired)") from None
+            raise DaemonUnavailable(status, f"could not exchange the API key for a desktop token at {origin} (HTTP {status})") from None
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+            raise DaemonUnavailable(0, f"could not exchange the API key for a desktop token at {origin}: {type(e).__name__}") from None
+        except ValueError:
+            raise DaemonUnavailable(0, f"the token reply from {origin} was not JSON") from None
+        tok = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(tok, str) or not tok:
+            raise DaemonUnavailable(0, f"the token reply from {origin} had no token")
+        life = float(body.get("expires_in") or 3600)
+        renew_after = body.get("renew_after_s")
+        renew_after = float(renew_after) if isinstance(renew_after, (int, float)) else max(life - TOKEN_RENEW_BEFORE_S, life / 2)
+        self._token, self._renew_at, self._expires_at = tok, now + max(0.0, min(renew_after, life)), now + life
 
 
 def connect(url: str | None = None, token: str | None = None, *, timeout: float = 900.0, retry_s: float = 60.0, check: bool = True,
@@ -285,6 +407,7 @@ class Client:
         # redirects: same origin only, MAX_REDIRECTS hops, check_transport on every hop (RedirectRefused otherwise)
         self._opener = urllib.request.build_opener(_RedirectPolicy(self.token, self.allow_insecure_http))
         self._certifi = False          # True once the system store failed and certifi's bundle is in use
+        self._cred = _Credentials(self.token)    # API key -> desktop token exchange when the gateway asks for it
         self._owned: dict[str, None] = {}          # ids of envs this client created and has not closed (insertion order)
         self._owned_lock = threading.Lock()
         self.close_on_exit = close_on_exit
@@ -292,6 +415,9 @@ class Client:
             atexit.register(self._close_at_exit)
         if handle_signals:
             _install_signal_exit()
+
+    def __repr__(self):
+        return f"<drums.Client {_origin_text(self.url)} auth={self._cred.kind}>"   # never the key or the token
 
     # cleanup ----------------------------------------------------------------------------------------------------------
     def _own(self, env_id):
@@ -378,13 +504,15 @@ class Client:
         (scheme, host, port), at most MAX_REDIRECTS hops; any other redirect raises RedirectRefused unfollowed."""
         data = None if body is None else json.dumps(body).encode()
         headers = {"Content-Type": "application/json", **(headers or {})}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
         deadline = time.monotonic() + (self.retry_s if method == "GET" else 0.0)
         delay = 0.25
         policy = self.retry
         waited_429, attempt_429 = 0.0, 0
+        renewed = False
         while True:
+            bearer = self._cred.bearer(self)
+            if bearer:
+                headers["Authorization"] = f"Bearer {bearer}"
             req = urllib.request.Request(self.url + path, data=data, method=method, headers=headers)
             pause = delay
             try:
@@ -406,6 +534,12 @@ class Client:
                         waited_429 += w
                         time.sleep(w)
                         continue
+                if e.code == 401 and self._cred.using_token and not renewed:
+                    # the token expired, was revoked or its signing key rotated: exchange once more (a 401 is refused
+                    # before anything ran, so even a POST is safe to send again)
+                    renewed = True
+                    self._cred.invalidate()
+                    continue
                 if e.code == 503 and time.monotonic() < deadline:
                     pause = max(delay, min(ra, max(0.0, deadline - time.monotonic()))) if ra is not None else delay
                 else:
