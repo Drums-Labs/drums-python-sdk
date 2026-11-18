@@ -246,7 +246,12 @@ class _Credentials:
     the console's token URL; the gateway then gets only the short-lived desktop token, renewed before it expires (at
     the console's `renew_after_s`, else 5 min before `expires_in`) and once after a 401. Any other credential (a drumsd
     token) is sent as it is and nothing is discovered. Neither value is ever part of a repr, a log line or an error
-    message: errors name the origin and the HTTP status only."""
+    message: errors name the origin and the HTTP status only.
+
+    The exchange (and every renewal) uses the client's transport: the certifi fallback when the system certificate
+    store cannot verify the console, and the client's RetryPolicy for a 429 (waiting at least its Retry-After). In
+    `token` mode, where there is no fallback, a 5xx or a dropped connection is retried within the same budget too;
+    asking for a token twice only mints a second token, so it is always safe to repeat."""
 
     def __init__(self, key: str | None):
         self._key = key
@@ -257,6 +262,7 @@ class _Credentials:
         self._renew_at = 0.0
         self._expires_at = 0.0
         self._next_try = 0.0          # `both` mode with the console away: try the exchange again after this
+        self.last_error: str | None = None   # why the last exchange failed (origin and status only), for preflight
 
     def __repr__(self):
         return f"<drums credentials: {self.kind}>"
@@ -276,6 +282,20 @@ class _Credentials:
     @property
     def using_token(self) -> bool:
         return self._token is not None
+
+    @property
+    def mode(self) -> str | None:
+        """`plain` (a drumsd token), `api_key`, `token`, `both`, or None while the gateway's mode is not known yet."""
+        return self._mode
+
+    @property
+    def token_url(self) -> str | None:
+        return self._token_url
+
+    @property
+    def undiscovered(self) -> bool:
+        """An API key whose gateway mode is not known yet (the discovery request did not get an answer)."""
+        return bool(self._key) and self._mode is None
 
     def invalidate(self):
         with self._lock:
@@ -297,11 +317,14 @@ class _Credentials:
                 return self._token
             if not self._token and self._mode == "both" and now < self._next_try:
                 return self._key
+            # a renewal while the old token is still good, or `both` mode (the key still works), need not wait long
+            has_fallback = (self._token is not None and now < self._expires_at - 30) or self._mode == "both"
             try:
-                self._exchange(client, now)
+                self._exchange(client, now, patient=not has_fallback)
             except (AuthError, InsecureTransport, RedirectRefused):
                 raise
-            except DrumsError:
+            except DrumsError as e:
+                self.last_error = e.message
                 # renewal failed while the old token is still valid: keep using it until it expires
                 if self._token and now < self._expires_at - 30:
                     return self._token
@@ -309,6 +332,7 @@ class _Credentials:
                     self._next_try = now + 60.0
                     return self._key
                 raise
+            self.last_error = None
             return self._token
 
     def _discover(self, client):
@@ -321,7 +345,9 @@ class _Credentials:
             e.close()
             self._mode = "api_key"              # drumsd, or a gateway without token support
             return
-        except (RedirectRefused, urllib.error.URLError, ConnectionError, TimeoutError, OSError, ValueError):
+        except (RedirectRefused, urllib.error.URLError, ConnectionError, TimeoutError, OSError, ValueError) as e:
+            if _is_cert_failure(e) and client._use_certifi():
+                return self._discover(client)    # once: _use_certifi is False the second time
             return                              # unknown for now; the request itself will report the transport problem
         mode = info.get("auth_mode") if isinstance(info, dict) else None
         url = info.get("token_url") if isinstance(info, dict) else None
@@ -331,25 +357,57 @@ class _Credentials:
         else:
             self._mode = "api_key"
 
-    def _exchange(self, client, now: float):
+    def _exchange(self, client, now: float, patient: bool = True):
+        """POST the key to the token URL. A 429 is retried under the client's RetryPolicy (at least its Retry-After);
+        with `patient` (token mode and no valid token: nothing else would work) a 5xx or a dropped connection is too.
+        A failed certificate check switches the client to certifi's bundle once, as for the gateway."""
         url = self._token_url
         origin = _origin_text(url)
-        opener = urllib.request.build_opener(_RedirectPolicy(self._key, client.allow_insecure_http))
-        req = urllib.request.Request(url, data=b"", method="POST",
-                                     headers={"Authorization": f"Bearer {self._key}", "Accept": "application/json", "Content-Length": "0"})
-        try:
-            with opener.open(req, timeout=min(client.timeout, 30.0)) as r:
-                body = json.loads(r.read() or b"null")
-        except urllib.error.HTTPError as e:
-            status = e.code
-            e.close()
-            if status == 401:
-                raise AuthError(401, f"the console at {origin} refused the API key (missing, invalid, revoked or expired)") from None
-            raise DaemonUnavailable(status, f"could not exchange the API key for a desktop token at {origin} (HTTP {status})") from None
-        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
-            raise DaemonUnavailable(0, f"could not exchange the API key for a desktop token at {origin}: {type(e).__name__}") from None
-        except ValueError:
-            raise DaemonUnavailable(0, f"the token reply from {origin} was not JSON") from None
+        policy = client.retry
+        waited, attempt = 0.0, 0
+
+        def backoff(ra) -> bool:
+            nonlocal waited, attempt
+            if policy is None or attempt >= policy.max_attempts:
+                return False
+            w = policy.wait(attempt, ra)
+            if waited + w > policy.max_wait_s:
+                return False
+            attempt += 1
+            waited += w
+            time.sleep(w)
+            return True
+
+        while True:
+            opener = client._build_opener(self._key)
+            req = urllib.request.Request(url, data=b"", method="POST",
+                                         headers={"Authorization": f"Bearer {self._key}", "Accept": "application/json", "Content-Length": "0"})
+            try:
+                with opener.open(req, timeout=min(client.timeout, 30.0)) as r:
+                    body = json.loads(r.read() or b"null")
+                break
+            except urllib.error.HTTPError as e:
+                status = e.code
+                ra = _retry_after(e.headers)
+                e.close()
+                if status == 401:
+                    raise AuthError(401, f"the console at {origin} refused the API key (missing, invalid, revoked or expired)") from None
+                if (status == 429 or (patient and status >= 500)) and backoff(ra):
+                    continue
+                err = DaemonUnavailable(status, f"could not exchange the API key for a desktop token at {origin} (HTTP {status})")
+                err.retry_after = ra
+                raise err from None
+            except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+                if _is_cert_failure(e):
+                    if client._use_certifi(origin):
+                        continue
+                    raise CertificateError(origin, str(getattr(e, "reason", e)),
+                                           "certifi's bundle could not verify it either" if client._certifi else _CERT_HINT) from None
+                if patient and backoff(None):
+                    continue
+                raise DaemonUnavailable(0, f"could not exchange the API key for a desktop token at {origin}: {type(e).__name__}") from None
+            except ValueError:
+                raise DaemonUnavailable(0, f"the token reply from {origin} was not JSON") from None
         tok = body.get("token") if isinstance(body, dict) else None
         if not isinstance(tok, str) or not tok:
             raise DaemonUnavailable(0, f"the token reply from {origin} had no token")
@@ -411,6 +469,7 @@ class Client:
         # redirects: same origin only, MAX_REDIRECTS hops, check_transport on every hop (RedirectRefused otherwise)
         self._opener = urllib.request.build_opener(_RedirectPolicy(self.token, self.allow_insecure_http))
         self._certifi = False          # True once the system store failed and certifi's bundle is in use
+        self._certifi_ctx = None
         self._cred = _Credentials(self.token)    # API key -> desktop token exchange when the gateway asks for it
         self._owned: dict[str, None] = {}          # ids of envs this client created and has not closed (insertion order)
         self._owned_lock = threading.Lock()
@@ -485,18 +544,27 @@ class Client:
         self.close()
 
     # transport --------------------------------------------------------------------------------------------------------
-    def _use_certifi(self) -> bool:
-        """Switch this client to certifi's CA bundle (once). False when certifi is missing or already in use."""
+    def _use_certifi(self, origin: str | None = None) -> bool:
+        """Switch this client to certifi's CA bundle (once; the gateway and the token exchange share it). False when
+        certifi is missing or already in use. `origin` is the server whose certificate failed (default: the gateway)."""
         if self._certifi:
             return False
         ctx = _certifi_context()
         if ctx is None:
             return False
-        self._opener = urllib.request.build_opener(_RedirectPolicy(self.token, self.allow_insecure_http), urllib.request.HTTPSHandler(context=ctx))
+        self._certifi_ctx = ctx
+        self._opener = self._build_opener(self.token)
         self._certifi = True
-        sys.stderr.write(f"drums: the system certificate store could not verify {_origin_text(self.url)}; using certifi's CA bundle "
+        sys.stderr.write(f"drums: the system certificate store could not verify {origin or _origin_text(self.url)}; using certifi's CA bundle "
                          "(to fix Python's own store on macOS, run \"Install Certificates.command\")\n")
         return True
+
+    def _build_opener(self, token: str | None):
+        """An opener with the same-origin redirect policy for `token`, and certifi's bundle once the client uses it."""
+        handlers = [_RedirectPolicy(token, self.allow_insecure_http)]
+        if self._certifi_ctx is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=self._certifi_ctx))
+        return urllib.request.build_opener(*handlers)
 
     def call(self, method: str, path: str, body=None, raw: bool = False, timeout: float | None = None, headers: dict | None = None):
         """One request. GETs are retried while drumsd is unreachable (up to retry_s: a restarting drumsd comes back and
@@ -539,9 +607,10 @@ class Client:
                         waited_429 += w
                         time.sleep(w)
                         continue
-                if e.code == 401 and self._cred.using_token and not renewed:
-                    # the token expired, was revoked or its signing key rotated: exchange once more (a 401 is refused
-                    # before anything ran, so even a POST is safe to send again)
+                if e.code == 401 and (self._cred.using_token or self._cred.undiscovered) and not renewed:
+                    # the token expired, was revoked or its signing key rotated, or the key went out before the
+                    # gateway's auth mode was known (a token-mode gateway refuses keys): discover and exchange once
+                    # more (a 401 is refused before anything ran, so even a POST is safe to send again)
                     renewed = True
                     self._cred.invalidate()
                     continue
