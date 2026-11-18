@@ -203,9 +203,31 @@ page = client.runs(kind="scripted_test", status="completed", limit=20)
 for run in page["items"]:
     print(run["id"], run["status"], run.get("stop_reason"))
 
-run = client.run(page["items"][0]["id"])            # status, counts and events of one run
+run = client.get_run(page["items"][0]["id"])        # status, counts and events of one run (also client.run(<uuid>))
 new = client.create_run(spec, idempotency_key="nightly-2026-11-13")   # spec: the request the console shows
 ```
+
+### Your own training loop as a run
+
+A trainer that drives desktops itself (prime-rl, verifiers, your own loop) opens a run object, so the console shows
+the run (task set, config hash, steps, reward, zero-advantage share, rollouts, desktops busy, cost) instead of a list
+of anonymous computers:
+
+```python
+with client.run("qwen27b-d2", kind="training", task_set=task_set_id, config=cfg) as run:
+    for step in range(num_steps):
+        ...                                                         # your rollouts and optimizer step
+        run.step(step, reward=mean_reward, zero_advantage_share=zero_adv, rollouts=n, desktops_busy=busy)
+```
+
+- `run.step()` only records the point; the points are sent at most once per 30 s (`flush_s=`) and once more on close.
+- The block's end closes the run: `completed`, `failed` with the exception's text if the block raised, `cancelled`
+  on Ctrl-C. A process that exits with the run still open closes it as `failed` (bounded to 10 s).
+- Desktops created while the run is open carry its name as their label (`X-Drums-Run-Label`; fork children inherit
+  it), so the Computers page can filter them by run.
+- On a gateway without the run routes (`POST /v1/runs` for training runs, `PATCH /v1/runs/{id}`,
+  `POST /v1/runs/{id}/close`), or with a key without `runs:write`, the run is a no-op with one warning and training
+  goes on; `strict=True` raises `drums.RunNotSupported` instead. The labels still apply.
 
 Runs, evaluations, API keys and the audit log exist on the Drums gateway only; against a plain `drumsd` these
 methods raise `drums.NotFound`. Concepts: [runs and evaluations](https://docs.drums.run/concepts/runs-and-evaluations).
