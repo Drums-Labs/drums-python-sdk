@@ -255,20 +255,27 @@ the run (task set, config hash, steps, reward, zero-advantage share, rollouts, d
 of anonymous computers:
 
 ```python
-with client.run("qwen27b-d2", kind="training", task_set=task_set_id, config=cfg) as run:
+with client.run("qwen27b-d2", kind="training", task_set=task_set_id, config=cfg, desktops_provisioned=128) as run:
     for step in range(num_steps):
         ...                                                         # your rollouts and optimizer step
         run.step(step, reward=mean_reward, zero_advantage_share=zero_adv, rollouts=n, desktops_busy=busy)
 ```
 
+- `kind` is `training` (or `rl`) or `evaluation` (or `eval`). `desktops_provisioned` is shown against
+  `desktops_busy` on the run page, so idle desktops are visible; `run.step()` takes its own `desktops_provisioned=`
+  too.
+
 - `run.step()` only records the point; the points are sent at most once per 30 s (`flush_s=`) and once more on close.
 - The block's end closes the run: `completed`, `failed` with the exception's text if the block raised, `cancelled`
   on Ctrl-C. A process that exits with the run still open closes it as `failed` (bounded to 10 s).
-- Desktops created while the run is open carry its name as their label (`X-Drums-Run-Label`; fork children inherit
-  it), so the Computers page can filter them by run.
+- Desktops created while the run is open carry its label (`X-Drums-Run-Label`, and `X-Drums-Run-Id`; fork children
+  inherit it), so the Computers page can filter them by run. The label is the run's name, or the one the gateway's
+  open reply names (`run.label`) when another running run already holds that name.
+- A 409 on a heartbeat or on close means the run has ended on the gateway (closed elsewhere, or marked lost after
+  30 min without a heartbeat). The SDK stops sending for it with one warning (`run.ended` says why); training goes on.
 - On a gateway without the run routes (`POST /v1/runs` for training runs, `PATCH /v1/runs/{id}`,
-  `POST /v1/runs/{id}/close`), or with a key without `runs:write`, the run is a no-op with one warning and training
-  goes on; `strict=True` raises `drums.RunNotSupported` instead. The labels still apply.
+  `POST /v1/runs/{id}/close`), or with a key that has neither `runs:write` nor `computers:write`, the run is a no-op
+  with one warning and training goes on; `strict=True` raises `drums.RunNotSupported` instead. The labels still apply.
 
 Runs, evaluations, API keys and the audit log exist on the Drums gateway only; against a plain `drumsd` these
 methods raise `drums.NotFound`. Concepts: [runs and evaluations](https://docs.drums.run/concepts/runs-and-evaluations).

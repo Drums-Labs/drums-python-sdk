@@ -718,13 +718,16 @@ class Client:
         return self.call("GET", f"/v1/runs/{urllib.parse.quote(str(run_id))}")
 
     def open_run(self, name: str, kind: str = "training", *, task_set=None, config=None, flush_s: float = 30.0,
-                 strict: bool = False, label: str | None = None) -> "Run":
+                 strict: bool = False, label: str | None = None, desktops_provisioned: int | None = None) -> "Run":
         """A Run (drums.runs.Run): `with client.open_run(name, kind="training", task_set=..., config=...) as run:` opens
         it on the gateway, `run.step(step, reward=..., zero_advantage_share=..., rollouts=..., desktops_busy=...)`
         records a point (sent at most once per `flush_s` s), and the block's end closes it (failed when the block
-        raised). Desktops created while it is open carry its label. On a gateway without run routes it is a no-op
-        with one warning (strict=True raises instead)."""
-        return Run(self, name, kind, task_set=task_set, config=config, flush_s=flush_s, strict=strict, label=label)
+        raised). Desktops created while it is open carry its label (the one the gateway's open reply names).
+        `desktops_provisioned` is sent on open (and step() takes its own). On a gateway without run routes it is a
+        no-op with one warning (strict=True raises instead); a 409 on a heartbeat or close means the run ended on
+        the gateway, and the SDK stops sending for it."""
+        return Run(self, name, kind, task_set=task_set, config=config, flush_s=flush_s, strict=strict, label=label,
+                   desktops_provisioned=desktops_provisioned)
 
     def run(self, name_or_id: str, kind: str | None = None, **kw):
         """`client.run(name, kind="training", task_set=..., config=...)` -> a Run to use as a context manager

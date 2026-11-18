@@ -21,6 +21,8 @@ RUN_ID = "7d4f0c1e-3b9a-4c55-9a1e-2f6b8c0d1e2f"
 class Gw(BaseHTTPRequestHandler):
     mode = "w3"            # "w3": the run routes exist; "today": the 0.3 gateway; "down": 503 on runs
     calls = []
+    open_label = None      # the label the W3 open reply names (None: no label in the reply)
+    ended = False          # W3: the run has ended on the gateway (closed elsewhere, or lost): 409 on PATCH and close
 
     def log_message(self, *a):
         pass
@@ -50,7 +52,12 @@ class Gw(BaseHTTPRequestHandler):
                     return self._reply(400, {"error": "invalid run spec: task_ids Required", "code": "invalid_request"})
                 return self._reply(404, {"error": "method not allowed on this path", "code": "not_found"})
             if self.command == "POST" and self.path == "/v1/runs":
-                return self._reply(201, {"run_id": RUN_ID, "status": "running", "created": True})
+                reply = {"run_id": RUN_ID, "status": "running", "created": True}
+                if Gw.open_label:
+                    reply.update(object="trainer_run", id=RUN_ID, label=Gw.open_label)
+                return self._reply(201, reply)
+            if Gw.ended and self.path.startswith(f"/v1/runs/{RUN_ID}") and self.command in ("PATCH", "POST"):
+                return self._reply(409, {"error": "this run has ended (lost)", "code": "invalid_state"})
             if self.command == "PATCH" and self.path == f"/v1/runs/{RUN_ID}":
                 return self._reply(200, {"run_id": RUN_ID, "steps_recorded": len(body["steps"])})
             if self.command == "POST" and self.path == f"/v1/runs/{RUN_ID}/close":
@@ -84,6 +91,7 @@ class RunObject(unittest.TestCase):
     def setUp(self):
         Gw.calls.clear()
         Gw.mode = "w3"
+        Gw.open_label, Gw.ended = None, False
         self.c = drums.Client(self.url, TOKEN, retry_s=0.2)
 
     def calls(self, method, path_part):
@@ -200,6 +208,61 @@ class RunObject(unittest.TestCase):
                 r.step(0)
         self.assertFalse(r.supported)
         self.assertIn("runs:write", str(w[0].message))
+        self.assertIn("computers:write also suffices", str(w[0].message))
+
+    def test_scripted_test_is_not_a_run_kind(self):
+        with self.assertRaises(drums.BadRequest):
+            self.c.run("d2", kind="scripted_test")
+        for k in ("training", "evaluation", "eval", "rl"):
+            runs.Run(self.c, "d2", k)
+
+    def test_desktops_provisioned_goes_on_open_and_on_steps(self):
+        with self.c.run("d2", kind="training", desktops_provisioned=128) as r:
+            r.step(0, desktops_busy=40, desktops_provisioned=128)
+        self.assertEqual(self.calls("POST", "/v1/runs")[0]["body"]["desktops_provisioned"], 128)
+        pt = self.calls("PATCH", "/v1/runs/")[0]["body"]["steps"][0]
+        self.assertEqual((pt["desktops_busy"], pt["desktops_provisioned"]), (40, 128))
+        with self.c.run("d3", kind="training") as r:
+            pass
+        self.assertNotIn("desktops_provisioned", self.calls("POST", "/v1/runs")[-1]["body"])
+
+    def test_desktops_get_the_label_the_open_reply_names(self):
+        Gw.open_label = "d2-7d4f"                     # another running run held "d2"
+        with self.c.run("d2", kind="training") as r:
+            self.assertEqual(r.label, "d2-7d4f")
+            self.c.create("calc")
+        create = self.calls("POST", "/v1/slots")[0]
+        self.assertEqual(create["headers"].get("X-Drums-Run-Label"), "d2-7d4f")
+        self.assertEqual(create["headers"].get("X-Drums-Run-Id"), RUN_ID)
+
+    def test_a_409_on_heartbeat_means_the_run_ended_and_stops_the_retries(self):
+        r, clock = self.run_obj()
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            with r:
+                r.step(0)                                           # sent
+                Gw.ended = True
+                for i in range(1, 50):
+                    clock.t += 31                                   # every step is due for a flush
+                    r.step(i)
+        self.assertEqual(len(self.calls("PATCH", "/v1/runs/")), 2, "one 409, then nothing more is sent")
+        self.assertEqual(self.calls("POST", "/close"), [], "no close for a run the gateway already ended")
+        self.assertIn("lost", r.ended)
+        self.assertEqual(r.status, "closed")
+        ended = [x for x in w if "has ended" in str(x.message)]
+        self.assertEqual(len(ended), 1)
+        self.assertIn("ended on the gateway", repr(r))
+
+    def test_a_409_on_close_is_quiet(self):
+        r, _ = self.run_obj()
+        r.open()
+        Gw.ended = True
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            r.close()
+        self.assertEqual(len(self.calls("POST", "/close")), 1)
+        self.assertEqual([x for x in w if "could not close" in str(x.message)], [])
+        self.assertTrue(r.ended)
 
     def test_a_gateway_that_is_down_keeps_the_points_and_opens_later(self):
         Gw.mode = "down"

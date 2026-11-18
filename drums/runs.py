@@ -9,10 +9,16 @@ list of anonymous computers (audit A-36).
 
 Wire (gateway routes; the SDK feature-detects them and is a no-op with one warning on a gateway without them):
 
-    POST /v1/runs                 {name, kind, task_set_id | task_set, config, config_hash, label}  -> {run_id | id, ...}
-                                  (Idempotency-Key header: a retried open returns the same run)
-    PATCH /v1/runs/{id}           {steps: [{step, reward, zero_advantage_share, rollouts, desktops_busy, at, extra?}]}
+    POST /v1/runs                 {name, kind, task_set_id | task_set, config, config_hash, label, desktops_provisioned?}
+                                  -> {run_id | id, label, ...} (Idempotency-Key header: a retried open returns the same
+                                  run). The reply's `label` is the one in use: when a running run already holds the
+                                  label the gateway gives this one `<label>-<4 of its id>`, and desktops get that.
+    PATCH /v1/runs/{id}           {steps: [{step, reward, zero_advantage_share, rollouts, desktops_busy,
+                                            desktops_provisioned, at, extra?}]}
     POST /v1/runs/{id}/close      {status: completed | failed | cancelled, error, steps_total}
+
+A 409 on PATCH or close means the gateway has ended the run (closed, or marked lost after 30 min without a
+heartbeat): the SDK stops sending for it, with one warning, instead of retrying the same points forever.
 
 Buffering: `step()` only records the point; the buffer is sent at most once per `flush_s` seconds (default 30), from
 inside the next `step()` call that finds the interval passed, and once more on close. A failed send keeps the
@@ -37,12 +43,12 @@ import urllib.parse
 import uuid
 import warnings
 
-from .errors import AuthError, BadRequest, DrumsError, NotFound
+from .errors import AuthError, BadRequest, Conflict, DrumsError, NotFound
 
 DEFAULT_FLUSH_S = 30.0
 MAX_BUFFER = 10_000
 LABEL_MAX = 120          # the gateway keeps at most 120 characters of a run label
-RUN_KINDS = ("training", "evaluation", "rl", "scripted_test")
+RUN_KINDS = ("training", "evaluation", "eval", "rl")   # the gateway stores evaluation/eval as eval, rl as training
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 
@@ -63,7 +69,8 @@ def _now_iso() -> str:
 
 
 class RunNotSupported(DrumsError):
-    """The gateway has no run routes yet (or the key lacks runs:write); raised only with strict=True."""
+    """The gateway has no run routes yet (or the key has neither runs:write nor computers:write); raised only with
+    strict=True."""
 
 
 class Run:
@@ -72,10 +79,13 @@ class Run:
 
     `id` is the gateway's run id (None until opened, or when the gateway cannot record runs), `supported` False
     when the gateway has no run routes (then every method is a no-op), `steps_total` the number of step() calls,
-    `last` the last point, `dropped` points lost to a full buffer."""
+    `last` the last point, `dropped` points lost to a full buffer, `ended` the reason when the gateway answered 409
+    (the run ended there) and the SDK stopped sending. `label` is the gateway's label once the run is open.
+    `desktops_provisioned` (optional) is how many desktops the trainer provisioned for the run, sent on open; a
+    step() can send its own count too."""
 
     def __init__(self, client, name: str, kind: str = "training", *, task_set=None, config=None, flush_s: float = DEFAULT_FLUSH_S,
-                 strict: bool = False, label: str | None = None, clock=time.monotonic):
+                 strict: bool = False, label: str | None = None, desktops_provisioned: int | None = None, clock=time.monotonic):
         if not isinstance(name, str) or not name.strip():
             raise BadRequest(400, "a run needs a name")
         if kind not in RUN_KINDS:
@@ -87,6 +97,8 @@ class Run:
         self.flush_s = float(flush_s)
         self.strict = strict
         self.label = (label or self.name)[:LABEL_MAX]
+        self.desktops_provisioned = desktops_provisioned
+        self.ended: str | None = None            # set when the gateway answered 409: the run ended there
         self.id: str | None = None
         self.record: dict = {}
         self.supported: bool | None = None       # None: not tried yet
@@ -134,6 +146,8 @@ class Run:
         if self.id or self.supported is False:
             return self
         body = {"name": self.name, "kind": self.kind, "config": self.config, "config_hash": self.config_hash, "label": self.label}
+        if self.desktops_provisioned is not None:
+            body["desktops_provisioned"] = int(self.desktops_provisioned)
         if self.task_set is not None:
             body["task_set_id" if is_uuid(self.task_set) else "task_set"] = self.task_set
         try:
@@ -148,7 +162,7 @@ class Run:
             return self
         except DrumsError as e:
             if e.status == 403:
-                self._unsupported(f"forbidden: {e.message} (the key needs runs:write)", e)
+                self._unsupported(f"forbidden: {e.message} (the key needs runs:write; computers:write also suffices)", e)
                 return self
             if self.strict:
                 raise
@@ -159,10 +173,13 @@ class Run:
             self._unsupported("POST /v1/runs gave no run id")
             return self
         self.id, self.record, self.supported = str(rid), r, True
+        got = r.get("label")
+        if isinstance(got, str) and got.strip():
+            self.label = got.strip()[:LABEL_MAX]         # the label in use (another running run may have held ours)
         return self
 
     def step(self, step: int, reward: float | None = None, zero_advantage_share: float | None = None, rollouts: int | None = None,
-             desktops_busy: int | None = None, **extra) -> None:
+             desktops_busy: int | None = None, desktops_provisioned: int | None = None, **extra) -> None:
         """Record one trainer step. Sent with the others at most once per `flush_s` seconds (and on close)."""
         if self.status == "closed":
             self._warn("closed", "step() after close() is ignored")
@@ -170,7 +187,8 @@ class Run:
         if self.status == "new":
             self.open()
         point = {"step": int(step), "at": _now_iso()}
-        for k, v in (("reward", reward), ("zero_advantage_share", zero_advantage_share), ("rollouts", rollouts), ("desktops_busy", desktops_busy)):
+        for k, v in (("reward", reward), ("zero_advantage_share", zero_advantage_share), ("rollouts", rollouts), ("desktops_busy", desktops_busy),
+                     ("desktops_provisioned", desktops_provisioned)):
             if v is not None:
                 point[k] = v
         if extra:
@@ -178,7 +196,7 @@ class Run:
         with self._lock:
             self.steps_total += 1
             self.last = point
-            if self.supported is False:
+            if self.supported is False or self.ended:
                 return
             self._buf.append(point)
             if len(self._buf) > MAX_BUFFER:
@@ -191,7 +209,7 @@ class Run:
 
     def flush(self) -> bool:
         """Send the buffered points now (PATCH /v1/runs/{id}). True when nothing is left to send."""
-        if self.supported is False:
+        if self.supported is False or self.ended:
             return True
         if not self.id:
             self.open()
@@ -208,6 +226,9 @@ class Run:
             return True
         except AuthError:
             raise
+        except Conflict as e:
+            self._end_remote(e, len(pts))
+            return True
         except (BadRequest, NotFound) as e:
             if e.status in (404, 405) and "method not allowed" in str(e.message):
                 self._unsupported(f"PATCH /v1/runs/{{id}} answered {e.status}: {e.message}", e)
@@ -236,12 +257,14 @@ class Run:
             if self.status == "new":
                 return
             self.flush()
-            if self.id and self.supported:
+            if self.id and self.supported and not self.ended:
                 body = {"status": status, "error": (error or None) and str(error)[:1000], "steps_total": self.steps_total}
                 try:
                     self.client.call("POST", f"/v1/runs/{urllib.parse.quote(self.id)}/close", body, timeout=self._timeout)
                 except AuthError:
                     raise
+                except Conflict as e:              # already ended there (closed elsewhere, or marked lost)
+                    self.ended = self.ended or f"{e.message}"
                 except DrumsError as e:
                     if self.strict:
                         raise
@@ -249,6 +272,15 @@ class Run:
         finally:
             self.status = "closed"
             self._release()
+
+    def _end_remote(self, e, unsent: int = 0):
+        """A 409 on PATCH: the gateway ended the run (closed elsewhere, or lost after 30 min without a heartbeat).
+        Drop what is buffered and stop sending; retrying would get the same answer."""
+        with self._lock:
+            lost, self._buf = unsent + len(self._buf), []
+        self.ended = str(e.message)
+        self._warn("ended", f"the gateway says the run has ended ({e.message}); its steps are no longer sent"
+                   + (f" ({lost} buffered points dropped)" if lost else ""))
 
     def _release(self):
         if self._labelled:
@@ -280,4 +312,4 @@ class Run:
         return False
 
     def __repr__(self):
-        return f"<drums.Run {self.name!r} id={self.id} {self.status} steps={self.steps_total}{'' if self.supported is not False else ' (not recorded)'}>"
+        return f"<drums.Run {self.name!r} id={self.id} {self.status} steps={self.steps_total}{'' if self.supported is not False else ' (not recorded)'}{' (ended on the gateway)' if self.ended else ''}>"
