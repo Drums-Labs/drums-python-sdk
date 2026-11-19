@@ -1,5 +1,5 @@
 """`drums preflight` / `drums.preflight(...)`: before any GPU is paid for, check that the gateway, the key and the
-workspace can carry N desktops for H hours. Every block of the D1 run (rate limit, spend cap, live-desktop quota,
+workspace can carry N desktops for H hours. Every block we hit in our own 128-desktop training run (rate limit, spend cap, live-desktop quota,
 host capacity, control-plane health, a task set nobody had validated) would have shown up here.
 
     drums preflight --desktops 128 --hours 3 --task-set 0b5c2a52-... [--model-gpus 2:6] [--json]
@@ -23,7 +23,7 @@ What is checked, and where the numbers come from (only reads; nothing is created
     spend cap      spent this period + N x H x the desktop-hour price <= the cap
     task set       (with --task-set) registered for this workspace, and validated (oracle accepted, none rejected)
 
-The rate limit, quota, spend cap and price come from `GET /v1/limits` (scope usage:read; Drums-Labs/drums#49, shape
+The rate limit, quota, spend cap and price come from `GET /v1/limits` (scope usage:read; shape
 in `_limits_view`). On a gateway that does not serve it yet, those rows say "not checked" and why, and
 `--desktop-hour-usd` supplies the price for the projection. A row that could not be checked never fails the
 preflight; `--strict` does.
@@ -40,7 +40,7 @@ import urllib.request
 
 from .errors import AuthError, DrumsError, NotFound
 
-#: D1 rule of thumb (2026-11-16, 128 desktops on Qwen3.5-27B): each ACTIVE desktop costs about one action and one
+#: Rule of thumb from our 128-desktop GRPO run on Qwen3.5-27B (2026-11-16): each ACTIVE desktop costs about one action and one
 #: screenshot per turn every few seconds through the gateway, about 0.5 requests per second (128 desktops needed about
 #: 60 req/s). A run of N desktops needs a per-key rate of at least N x this.
 REQUESTS_PER_DESKTOP_S = 0.5
@@ -50,7 +50,7 @@ BURST_PER_DESKTOP = 1.0
 #: The gateway's default per-key limit (RATE_LIMIT_PER_S / RATE_LIMIT_BURST unset): a pilot setting.
 DEFAULT_RATE_PER_S, DEFAULT_RATE_BURST = 20, 60
 REQUIRED_SCOPES = ("computers:read", "computers:write")
-#: runs:write is not wanted: the gateway opens trainer runs with computers:write too (Drums-Labs/drums#41)
+#: runs:write is not wanted: the gateway opens trainer runs with computers:write too 
 WANTED_SCOPES = {"usage:read": "usage and cost reads (and GET /v1/limits, so the quota and spend rows) are refused"}
 #: /v1/health slower than this is a warning, ten times slower a failure (the 2026-11-16 outage answered in 10 to 90 s)
 HEALTH_SLOW_S = 2.0
@@ -147,7 +147,7 @@ def _num(d, *keys):
 
 
 def _limits_view(doc) -> dict:
-    """The fields preflight reads from `GET /v1/limits` (served by Drums-Labs/drums#49; any of them may be missing,
+    """The fields preflight reads from `GET /v1/limits` (any of them may be missing,
     and the gateway's extra fields are ignored):
 
         {"workspace": {"max_live_computers", "live_computers", "max_spend_usd", "spent_usd", "period_end",
@@ -272,7 +272,7 @@ def preflight(desktops: int, hours: float, *, model_gpus=None, task_set: str | N
         add(Check("gateway", PASS, f"{client.url} answers (auth mode {token_mode or 'token'})"))
         if isinstance(token_err, AuthError):
             add(Check("auth", FAIL, f"the console refused the key when asked for a desktop token: {token_err.message}",
-                      "create a key (or check DRUMS_TOKEN has no stray space or newline)", links.page("api-keys", "API keys")))
+                      "create a key (or check DRUMS_TOKEN has no stray space or newline); no account? Drums Cloud is invite-only until January 2027: request access at https://console.drums.run/request-access", links.page("api-keys", "API keys")))
         else:
             add(Check("auth", FAIL, f"no desktop token: {token_err.message}",
                       "this gateway takes desktop tokens only; the console must answer to issue one: wait, or report it",
@@ -295,7 +295,7 @@ def preflight(desktops: int, hours: float, *, model_gpus=None, task_set: str | N
     except AuthError as e:
         add(Check("gateway", PASS, f"{client.url} answers"))
         add(Check("auth", FAIL, f"the key was refused: {e.message}",
-                  "create a key (or check DRUMS_TOKEN has no stray space or newline)", links.page("api-keys", "API keys")))
+                  "create a key (or check DRUMS_TOKEN has no stray space or newline); no account? Drums Cloud is invite-only until January 2027: request access at https://console.drums.run/request-access", links.page("api-keys", "API keys")))
         return _finish(desktops, hours, checks, need, gpus, gpu_hour_usd, check_console, console, timeout)
     except DrumsError as e:
         if e.status == 403:
@@ -518,7 +518,7 @@ def _finish(desktops, hours, checks, need, gpus, gpu_hour_usd, check_console, co
             gpu_usd = gpus["total"] * hours * float(gpu_hour_usd)
             need["projected_gpu_usd"] = round(gpu_usd, 2)
             detail += f"; projected {gpu_usd:,.2f} USD at {gpu_hour_usd:g} USD per GPU-hour"
-        detail += (". In D1 (Qwen3.5-27B, 2 inference + 6 trainer GPUs) the trainer kept 36 to 47 of 128 desktops in "
+        detail += (". In our 128-desktop run (Qwen3.5-27B, 2 inference + 6 trainer GPUs) the trainer kept 36 to 47 of 128 desktops in "
                    "flight; size N to what your trainer keeps in flight")
         checks.append(Check("model GPUs", INFO, detail))
     return PreflightReport(desktops, hours, checks, need)

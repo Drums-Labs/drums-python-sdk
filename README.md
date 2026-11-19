@@ -38,7 +38,8 @@ task's checker. Every episode carries a validity verdict, so a score from a brok
 
 This repository is the Python client for that runtime and the `drums` command. The package on PyPI is `drums-sdk`;
 the import name is `drums`. It uses only the standard library and supports Python 3.9 and later. It talks to Drums
-Cloud (`https://beta.drums.run/gw`) or to a self-hosted `drumsd` over the same HTTP API.
+Cloud (`https://beta.drums.run/gw`, the gateway for invited teams) or to a `drumsd` you run yourself, over the same HTTP
+API.
 
 ## Install
 
@@ -48,7 +49,11 @@ pip install drums-sdk
 
 ## Quickstart
 
-Sign in at [console.drums.run](https://console.drums.run), open **API Keys** and create a key. It starts with
+> **Drums Cloud is invite-only until January 2027.** [Request access](https://console.drums.run/request-access). Without an invite you can still install
+> the SDK, read the API below and run the test suite (`python -m unittest`, no account needed); the tests run every
+> call against a local fake server.
+
+With an invite, sign in at [console.drums.run](https://console.drums.run), open **API Keys** and create a key. It starts with
 `drums_sk_` and is shown once. Then, in a terminal:
 
 ```bash
@@ -106,7 +111,7 @@ print(report.table()); assert report.ok
 | auth | the key is accepted, not revoked, and does not expire before the run ends; on a gateway in desktop-token mode, the console issued a token for it (`both` mode on the key alone is a warning) |
 | scopes | `computers:read` and `computers:write` (required; `computers:write` also opens runs); `usage:read` (warned: `GET /v1/limits` needs it) |
 | host capacity, admission | the bound host has N free desktops, drumsd is ok, the host takes creates and no image checkpoint is stale |
-| rate limit | the per-key limit is at least N x 0.5 requests/s with a burst of N (the D1 rule: about 0.5 requests per second per active desktop, `drums._preflight.REQUESTS_PER_DESKTOP_S`) |
+| rate limit | the per-key limit is at least N x 0.5 requests/s with a burst of N (a rule of thumb from our own training runs: about 0.5 requests per second per active desktop, `drums._preflight.REQUESTS_PER_DESKTOP_S`) |
 | quota | the workspace's live-desktop limit leaves room for N |
 | spend cap | spent + N x H x the desktop-hour price stays under the cap |
 | task set | registered for the workspace and validated on a host (oracle accepted, none rejected) |
@@ -264,7 +269,7 @@ the run (task set, config hash, steps, reward, zero-advantage share, rollouts, d
 of anonymous computers:
 
 ```python
-with client.run("qwen27b-d2", kind="training", task_set=task_set_id, config=cfg, desktops_provisioned=128) as run:
+with client.run("my-grpo-run", kind="training", task_set=task_set_id, config=cfg, desktops_provisioned=128) as run:
     for step in range(num_steps):
         ...                                                         # your rollouts and optimizer step
         run.step(step, reward=mean_reward, zero_advantage_share=zero_adv, rollouts=n, desktops_busy=busy)

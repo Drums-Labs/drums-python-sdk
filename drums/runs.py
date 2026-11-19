@@ -1,8 +1,8 @@
 """The run object: a training (or evaluation) run the SDK opens, feeds and closes, so the console's Runs page can show
 it (task set, config hash, step counter, reward, zero-advantage share, rollouts, desktops busy, cost) instead of a
-list of anonymous computers (audit A-36).
+list of anonymous computers .
 
-    with client.run("qwen27b-d2", kind="training", task_set=task_set_id, config=cfg) as run:
+    with client.run("my-grpo-run", kind="training", task_set=task_set_id, config=cfg) as run:
         for step in range(steps):
             ...
             run.step(step, reward=mean_reward, zero_advantage_share=zero_adv, rollouts=n, desktops_busy=busy)

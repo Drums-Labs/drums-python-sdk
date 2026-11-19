@@ -1,5 +1,5 @@
 """Retry-After on every call (429 from the gateway's rate limit or no capacity, for GET and POST alike), the retry
-budget and its off switch, and the TLS fallback to certifi's CA bundle (A-07). Localhost fakes only."""
+budget and its off switch, and the TLS fallback to certifi's CA bundle. Localhost fakes only."""
 import email.utils
 import io
 import json

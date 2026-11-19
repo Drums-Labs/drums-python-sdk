@@ -259,13 +259,13 @@ class Preflight(unittest.TestCase):
         self.assertIn(self.url, self.row(rep, "console").detail)
 
     def test_the_limits_route_of_drums_49(self):
-        # the reply Drums-Labs/drums#49 serves, extra fields included
+        # the reply GET /v1/limits serves, extra fields included
         doc = {"workspace": {"id": "w", "max_live_computers": 128, "live_computers": 3, "max_spend_usd": 500, "spend_period": "month",
                              "period_start": "2026-11-01T00:00:00.000Z", "period_end": "2026-12-01T00:00:00.000Z", "spent_usd": 41.23,
                              "spent_age_s": 12, "used_pct": 8, "rate_limit_profile": "pilot"},
                "rate_limit": {"per_s": 20, "burst": 60, "applies_to": "each API key, at this gateway"},
                "price": {"desktop_hour_usd": 0.035, "source": "list_price"},
-               "host": {"id": "h1", "name": "drums-rc1", "status": "active", "max_desktops": 128, "live": 3, "free": 125,
+               "host": {"id": "h1", "name": "host-1", "status": "active", "max_desktops": 128, "live": 3, "free": 125,
                         "admission": "open", "creates_in_flight": 0, "max_creates_in_flight": 4, "host_mem_available_bytes": 123},
                "hosts": [], "cached": True}
         v = pf._limits_view(doc)
@@ -322,7 +322,7 @@ class Preflight(unittest.TestCase):
         c = self.row(self.pre(8, task_set="factory-v1"), "task set")                               # by name
         self.assertEqual(c.status, "pass")
         self.assertIn("could not be compared", c.detail)
-        Gw.state = {"task_set": VALID_SET, "limits": {**LIMITS, "host": {"id": "drums-rc1", "status": "active"}}}
+        Gw.state = {"task_set": VALID_SET, "limits": {**LIMITS, "host": {"id": "host-1", "status": "active"}}}
         self.assertEqual(self.row(self.pre(8, task_set=TS), "task set").status, "warn")
 
     def test_console_row(self):

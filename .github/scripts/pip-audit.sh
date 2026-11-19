@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dependency audit (A-40): install the package into a fresh venv the way CI does, freeze what got installed, and run
+# Dependency audit: install the package into a fresh venv the way CI does, freeze what got installed, and run
 # pip-audit on exactly that set. Fails on any known vulnerability that is not in the allowlist (.pip-audit-ignore).
 #
 #   .github/scripts/pip-audit.sh PIP_INSTALL_ARGS...      e.g. .github/scripts/pip-audit.sh '.[test]'

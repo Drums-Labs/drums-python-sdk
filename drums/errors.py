@@ -9,12 +9,17 @@ class DrumsError(Exception):
     retry_after = None
 
     def __init__(self, status: int, message: str, body=None):
-        super().__init__(f"drumsd HTTP {status}: {message}" if status else message)
+        super().__init__(f"server HTTP {status}: {message}" if status else message)
         self.status, self.message, self.body = status, message, body
 
 
 class AuthError(DrumsError):
     """401: missing or wrong token."""
+
+    HINT = "no key yet? Drums Cloud is invite-only until January 2027: request access at https://console.drums.run/request-access"
+
+    def __str__(self) -> str:
+        return f"{super().__str__()} ({self.HINT})"
 
 
 class InsecureTransport(DrumsError):

@@ -29,7 +29,7 @@ jobs:
           python -m build
           python -m twine check --strict dist/*
 
-  # A-40: the SDK has no runtime dependencies; the audited set is what CI installs to build and check it (pip, build,
+  # the SDK has no runtime dependencies; the audited set is what CI installs to build and check it (pip, build,
   # twine and their dependencies). Fails on any advisory not in .pip-audit-ignore.
   audit:
     name: pip-audit
