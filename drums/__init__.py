@@ -63,7 +63,11 @@ from . import runs as _runs
 from .runs import Run, RunNotSupported
 
 __version__ = "0.4.0"
-DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or "http://127.0.0.1:7070"
+LOCAL_URL = "http://127.0.0.1:7070"
+DEFAULT_URL = os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL") or LOCAL_URL
+_NO_SERVER_HINT = ("no server answers at " + LOCAL_URL + " and DRUMS_URL is not set. Set DRUMS_URL to your gateway "
+                   "(Drums Cloud: https://beta.drums.run/gw, invite-only until January 2027, request access at "
+                   "https://console.drums.run/request-access) or start a drumsd on this machine")
 DEFAULT_IMAGE = "osworld-ubuntu"
 
 __all__ = ["ActionFailed", "connect", "Client", "Env", "Reward", "Observation", "StepResult", "State", "ForkResult", "env", "__version__",
@@ -473,6 +477,10 @@ class Client:
         self._cred = _Credentials(self.token)    # API key -> desktop token exchange when the gateway asks for it
         self._owned: dict[str, None] = {}          # ids of envs this client created and has not closed (insertion order)
         self._owned_lock = threading.Lock()
+        # Nobody chose a server: the URL is the loopback default and no env var named one. If nothing answers there on
+        # the very first request, say so at once instead of retrying a daemon the user may not have.
+        self._implicit_local = self.url == LOCAL_URL and not (os.environ.get("DRUMS_URL") or os.environ.get("DRUMSD_URL"))
+        self._answered = False
         self._runs: list = []                      # open Run objects, innermost last: creates carry its label
         self.close_on_exit = close_on_exit
         if close_on_exit:
@@ -591,8 +599,10 @@ class Client:
             try:
                 with self._opener.open(req, timeout=timeout or self.timeout) as r:
                     b = r.read()
+                    self._answered = True
                     return b if raw else json.loads(b or b"null")
             except urllib.error.HTTPError as e:
+                self._answered = True
                 text = e.read().decode(errors="replace")
                 try:
                     body_j = json.loads(text)
@@ -637,6 +647,8 @@ class Client:
                         continue
                     raise CertificateError(_origin_text(self.url), str(getattr(e, "reason", e)),
                                            "certifi's bundle could not verify it either" if self._certifi else _CERT_HINT) from None
+                if self._implicit_local and not self._answered and isinstance(getattr(e, "reason", e), ConnectionRefusedError):
+                    raise DaemonUnavailable(0, _NO_SERVER_HINT) from None
                 if time.monotonic() >= deadline:
                     what = "the outcome is unknown; call env.refresh()" if method != "GET" else f"retried for {self.retry_s:.0f} s"
                     raise DaemonUnavailable(0, f"drumsd at {self.url} unreachable on {method} {path} ({what}): {getattr(e, 'reason', e)}") from None

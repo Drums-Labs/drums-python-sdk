@@ -5,7 +5,7 @@ SDK version was built against is noted where it matters.
 
 ## 0.4.0 - 2026-11-18
 
-Post-D1 fixes for training clients (audit 2026-11-16), integrated in one release. Minor version: new API and one
+Fixes for training clients, from our first 128-desktop training run, integrated in one release. Minor version: new API and one
 behaviour change (429 replies are retried, with an off switch); nothing is removed and no dependency is added. Every
 0.3 call keeps its signature and meaning. Built against drumsd 0.4.2 and the gateway routes of Drums-Labs/drums #41
 (trainer runs), #43 (desktop tokens), #46 (task-set tasks) and #49 (`GET /v1/limits`); against an older gateway each
@@ -13,7 +13,7 @@ feature falls back as described below.
 
 ### Changed
 
-- **429 replies are retried on every call** (A-29, #11). A 429 (the gateway's per-key rate limit, or no capacity
+- **429 replies are retried on every call** (#11). A 429 (the gateway's per-key rate limit, or no capacity
   right now: nothing was started) is retried for every method, step, screenshot, verify, create and fork included,
   waiting at least the reply's `Retry-After` (seconds or an HTTP date), with jittered exponential backoff, for at
   most 60 s of waiting per call (or 20 retries). `drums.RetryPolicy(max_wait_s, max_attempts, base_s, cap_s, jitter)`
@@ -23,7 +23,7 @@ feature falls back as described below.
 
 ### Added
 
-- **Desktop tokens** (A-30, #14; design note "control plane out of the data path", 3.1). `drums.connect(url, key)`
+- **Desktop tokens** (#14). `drums.connect(url, key)`
   keeps its signature. With a Drums API key (`drums_sk_...`) the client asks the gateway once how it authenticates
   (`GET <url>/auth`, no credential). When the gateway says `token` or `both`, the key is sent once to the console's
   token URL (https, or loopback http; the same transport and redirect rules as every other request) and the gateway
@@ -36,11 +36,11 @@ feature falls back as described below.
   gateway's mode was known (the discovery request got no answer) is retried once after a 401. A drumsd token, or a
   gateway in `api_key` mode, works exactly as before. Neither the key nor the token appears in a repr
   (`repr(client)` shows the auth kind only) or an error message.
-- **macOS certificates** (A-07, #11). When the system store cannot verify the gateway or the console and `certifi`
+- **macOS certificates** (#11). When the system store cannot verify the gateway or the console and `certifi`
   is installed, the client switches to certifi's CA bundle once (for both) and prints one line naming the server;
   without certifi it raises the new `CertificateError` (a `DaemonUnavailable`) with the fix
   (`Install Certificates.command` or `pip install certifi`). No new dependency.
-- **Run object** (A-36, #12, matching the gateway's trainer runs). `with client.run(name, kind="training",
+- **Run object** (#12, matching the gateway's trainer runs). `with client.run(name, kind="training",
   task_set=..., config=..., desktops_provisioned=N) as run:` opens a run (`POST /v1/runs`),
   `run.step(step, reward=, zero_advantage_share=, rollouts=, desktops_busy=, desktops_provisioned=)` buffers points
   sent at most once per 30 s (`PATCH /v1/runs/{id}`), and the block's end closes it (`POST /v1/runs/{id}/close`:
@@ -55,22 +55,22 @@ feature falls back as described below.
   `client.run(<run uuid>)` alone still returns the run's record; `get_run` and `open_run` are the explicit names.
 - **`drums preflight`** (#13). `drums preflight --desktops N --hours H [--model-gpus 2:6] [--task-set ID] [--json]`
   and `drums.preflight(...)`: gateway and console health, key validity, expiry and scopes, host capacity and
-  admission, rate limit (N x 0.5 requests/s, the D1 rule, `REQUESTS_PER_DESKTOP_S`), live-desktop quota, spend cap at
+  admission, rate limit (N x 0.5 requests/s, a rule of thumb from our training runs, `REQUESTS_PER_DESKTOP_S`), live-desktop quota, spend cap at
   the projected desktop-hour cost, and the task set's registration and validation. A pass/fail table with a fix and a
   console link per row; exit 1 on a failure (`--strict`: also on a warning or a row it could not check). Works in
   desktop-token mode: the exchange runs first, so a console that cannot issue a token is an auth failure (a `both`
   gateway on the key alone is a warning), and the console row defaults to the token URL's origin. Rate limit, quota,
-  spend cap, price and host admission come from `GET /v1/limits` (scope `usage:read`, Drums-Labs/drums#49); a
+  spend cap, price and host admission come from `GET /v1/limits` (scope `usage:read`); a
   gateway without it gets "not checked" on those rows.
-- **MCP custom tasks** (A-08, A-09, #15). `create_computer` and `load_task` take `task_set_id` + `task_id` (a task of
+- **MCP custom tasks** (#15). `create_computer` and `load_task` take `task_set_id` + `task_id` (a task of
   a registered set) besides `task` and `task_id`; a task document sent as a JSON string is accepted; new tools
   `list_task_sets` and `get_task_set` (36 tools, the gateway's tools.json); `verify` on a computer with no task says
-  so. Needs the gateway route `GET /v1/task-sets/{id}/tasks/{task_id}` (Drums-Labs/drums#46).
+  so. Needs the gateway route `GET /v1/task-sets/{id}/tasks/{task_id}`.
 
 ### CI
 
 - A `pip-audit` job on what CI installs, with an allowlist whose entries expire, and a weekly audit that opens an
-  issue on failure (A-40, #10).
+  issue on failure (#10).
 - The test matrix (3.9 to 3.13) runs on `ubuntu-24.04`: `ubuntu-latest` is 26.04, which has no Python 3.9 build.
 
 ## 0.3.0 - 2026-11-12
@@ -105,7 +105,7 @@ this release adds the local server and the client methods for the new gateway ro
 
 ## 0.2.5 - first release on PyPI
 
-The first version published on PyPI, as `drums-sdk` (`pip install drums-sdk`; the import name stays `drums`). Versions 0.2.0 to 0.2.4 shipped as wheels sent with invites.
+The first version published on PyPI, as `drums-sdk` (`pip install drums-sdk`; the import name stays `drums`). Versions 0.2.0 to 0.2.4 were not published.
 Everything below in the 0.2.x entries is included.
 
 Packaging and release:

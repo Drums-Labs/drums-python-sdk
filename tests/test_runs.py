@@ -1,4 +1,4 @@
-"""The run object (A-36): open on POST /v1/runs, buffered steps flushed at most once per flush_s by PATCH
+"""The run object: open on POST /v1/runs, buffered steps flushed at most once per flush_s by PATCH
 /v1/runs/{id}, close on POST /v1/runs/{id}/close, the run label on creates while it is open, and a no-op with one
 warning against a gateway that does not have these routes yet (today's gateway answers 400 to a training body and
 404 "method not allowed" to PATCH). Localhost fakes only."""
@@ -101,7 +101,7 @@ class RunObject(unittest.TestCase):
 
     def run_obj(self, **kw):
         clock = Clock()
-        r = runs.Run(self.c, "qwen27b-d2", "training", task_set="0b5c2a52-77a0-4c0e-9a39-0a7a0f3c1d10", config={"lr": 1e-5, "k": 6},
+        r = runs.Run(self.c, "my-grpo-run", "training", task_set="0b5c2a52-77a0-4c0e-9a39-0a7a0f3c1d10", config={"lr": 1e-5, "k": 6},
                      clock=clock, **kw)
         return r, clock
 

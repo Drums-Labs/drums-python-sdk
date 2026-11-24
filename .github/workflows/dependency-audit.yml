@@ -1,4 +1,4 @@
-# Weekly dependency audit (A-40): the same pip-audit as CI, on a schedule, against today's advisory database and today's
+# Weekly dependency audit: the same pip-audit as CI, on a schedule, against today's advisory database and today's
 # resolution of the declared ranges. On failure it opens one issue labelled "dependencies", or comments on the one that
 # is already open; it never closes an issue (a person does, after the fix lands).
 name: dependency-audit

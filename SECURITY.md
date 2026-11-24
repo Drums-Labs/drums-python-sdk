@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 0.3.x | yes |
-| 0.2.x | security fixes only, until 0.4.0 is released |
+| 0.4.x | yes |
+| 0.3.x | security fixes only |
 | earlier | no |
 
 The SDK uses only the Python standard library and has no runtime dependencies. Upgrade with `pip install -U drums-sdk`.

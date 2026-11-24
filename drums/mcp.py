@@ -358,7 +358,7 @@ class Server:
         try:
             r = env.verify(strict=False)
         except BadRequest as e:
-            # drumsd answers 400 to a verify with no task (or a task without an OSWorld checker): say which (A-08)
+            # drumsd answers 400 to a verify with no task (or a task without an OSWorld checker): say which
             if e.status != 400:
                 raise
             try:
