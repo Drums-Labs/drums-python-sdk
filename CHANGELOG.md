@@ -7,8 +7,7 @@ SDK version was built against is noted where it matters.
 
 Fixes for training clients, from our first 128-desktop training run, integrated in one release. Minor version: new API and one
 behaviour change (429 replies are retried, with an off switch); nothing is removed and no dependency is added. Every
-0.3 call keeps its signature and meaning. Built against drumsd 0.4.2 and the gateway routes of Drums-Labs/drums #41
-(trainer runs), #43 (desktop tokens), #46 (task-set tasks) and #49 (`GET /v1/limits`); against an older gateway each
+0.3 call keeps its signature and meaning. Built against drumsd 0.4.2 and the current Drums Cloud gateway; against an older gateway each
 feature falls back as described below.
 
 ### Changed
